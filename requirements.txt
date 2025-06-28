@@ -1,0 +1,6 @@
+discord.py==2.5.2
+requests
+pandas
+ta
+openai
+python-dotenv
