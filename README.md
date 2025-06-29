@@ -90,7 +90,7 @@ python run.py TSLA
 
 - All API keys and secrets are loaded from environment variables.
 - No sensitive data is logged or exposed in error messages.
-- Copyright headers and license information included.
+- License information is included in the LICENSE file (MIT License).
 - Follows best practices for modularity, error handling, and input validation.
 - `.gitignore` ensures secrets and logs are not tracked by git.
 
