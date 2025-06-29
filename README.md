@@ -143,7 +143,7 @@ python run.py TSLA
 The system now provides comprehensive trading analysis with detailed insights:
 
 ```
-🤖 AI Day Trader Agent - Enhanced Analysis for FIS
+🤖 AI Day Trader Agent - Enhanced Analysis for APAM
 
  Analysis Results:
 ----------------------------------------
