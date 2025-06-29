@@ -50,11 +50,13 @@ class EnhancedTradingPipeline:
     strength, timing, and market context.
     """
 
-    def __init__(self, symbol: str, core_position: int = 100):
+    def __init__(self, symbol: str):
         self.symbol = symbol
-        self.core_position = core_position
-        self.dividend_strategy = DividendCaptureStrategy(symbol, core_position)
-        self.position_tracker = PositionTracker(symbol, core_position)
+        # Import trading config
+        from config.settings import trading_config
+        self.config = trading_config
+        self.dividend_strategy = DividendCaptureStrategy(symbol, 100)  # Keep for compatibility
+        self.position_tracker = PositionTracker(symbol)
         self.signal_history = []
     
     def _prepare_market_data_for_analysis(self, raw_api_data: Dict) -> Dict:
@@ -417,47 +419,50 @@ class EnhancedTradingPipeline:
     def _calculate_position_size(self, signal: str, confidence: float, 
                                price_history: pd.DataFrame) -> int:
         """
-        Calculate position size based on signal strength and risk management.
+        Calculate position size based on trading capital and signal strength.
         
-        This implements a sophisticated position sizing algorithm that considers:
-        - Current positions
-        - Market volatility
-        - Signal confidence
-        - Risk limits
+        Uses portfolio-based position sizing instead of core position logic.
         """
         if signal == 'HOLD':
             return 0
         
-        # Get current positions
-        current_total = self.position_tracker.get_total_position()
+        # Get current stock price
+        current_price = price_history['close'].iloc[-1] if len(price_history) > 0 else 100.0
         
-        # Calculate maximum position based on risk management
-        volatility = price_history['close'].pct_change().std() * np.sqrt(252)  # Annualized
+        # Calculate volatility adjustment
+        if len(price_history) > 5:
+            volatility = price_history['close'].pct_change().std() * np.sqrt(252)  # Annualized
+            volatility_factor = max(0.5, 1.0 / (1.0 + volatility))  # Less aggressive penalty
+        else:
+            volatility_factor = 1.0
         
-        # High volatility = smaller positions
-        volatility_factor = 1.0 / (1.0 + volatility * 2)
-        
-        # Base position size (as percentage of core position)
-        if signal == 'BUY':
-            base_size = 0.3  # 30% of core position
-        else:  # SELL
-            # Can only sell what we have above core position
-            excess_position = max(0, current_total - self.core_position)
-            base_size = min(0.5, excess_position / self.core_position)
+        # Determine base position percentage based on confidence
+        if confidence >= 0.7:
+            base_percentage = self.config.MAX_POSITION_PERCENTAGE
+        elif confidence >= 0.5:
+            base_percentage = (self.config.MIN_POSITION_PERCENTAGE + self.config.MAX_POSITION_PERCENTAGE) / 2
+        else:
+            base_percentage = self.config.MIN_POSITION_PERCENTAGE
         
         # Adjust by confidence and volatility
-        position_percentage = base_size * confidence * volatility_factor
+        adjusted_percentage = base_percentage * confidence * volatility_factor
+        
+        # Calculate dollar amount to invest
+        position_value = self.config.TRADING_CAPITAL * adjusted_percentage
         
         # Convert to shares
-        position_shares = int(self.core_position * position_percentage)
+        position_shares = int(position_value / current_price)
         
-        # Round to nearest 10 shares
-        position_shares = (position_shares // 10) * 10
+        # Ensure minimum tradeable size (at least 1 share for small accounts)
+        if position_shares == 0 and position_value >= current_price * 0.5:
+            position_shares = 1
         
-        # Ensure minimum tradeable size
-        if position_shares > 0 and position_shares < 10:
-            position_shares = 10
-            
+        # Round to reasonable lot sizes for larger positions
+        if position_shares >= 100:
+            position_shares = (position_shares // 10) * 10
+        elif position_shares >= 50:
+            position_shares = (position_shares // 5) * 5
+        
         return position_shares
     
     def _calculate_risk_parameters(self, signal: str, quantity: int,
@@ -553,29 +558,31 @@ class PositionTracker:
     what positions we hold and why.
     """
     
-    def __init__(self, symbol: str, core_position: int):
+    def __init__(self, symbol: str):
         self.symbol = symbol
-        self.core_position = core_position
-        self.trading_position = 0  # Additional shares beyond core
+        self.current_position = 0  # Current shares held
         self.position_history = []
         
     def get_total_position(self) -> int:
-        """Get total current position (core + trading)."""
-        return self.core_position + self.trading_position
+        """Get total current position."""
+        return self.current_position
     
     def update_position(self, trade: Dict[str, any]) -> None:
         """Update position based on executed trade."""
         if trade['signal'] == 'BUY':
-            self.trading_position += trade['quantity']
+            self.current_position += trade['quantity']
         elif trade['signal'] == 'SELL':
-            self.trading_position -= trade['quantity']
+            self.current_position -= trade['quantity']
+        
+        # Ensure position doesn't go negative
+        self.current_position = max(0, self.current_position)
         
         # Record the trade
         self.position_history.append({
             'timestamp': trade['timestamp'],
             'action': trade['signal'],
             'quantity': trade['quantity'],
-            'position_after': self.get_total_position(),
+            'position_after': self.current_position,
             'strategy': trade.get('primary_strategy', 'unknown')
         })
     
@@ -583,9 +590,7 @@ class PositionTracker:
         """Get summary of current positions."""
         return {
             'symbol': self.symbol,
-            'core_position': self.core_position,
-            'trading_position': self.trading_position,
-            'total_position': self.get_total_position(),
+            'current_position': self.current_position,
             'recent_trades': self.position_history[-5:] if self.position_history else []
         }
 

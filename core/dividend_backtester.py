@@ -13,10 +13,6 @@ The backtester is designed to give you confidence in your strategy before
 risking real capital, while also helping identify optimal parameters.
 """
 
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -27,8 +23,12 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from core.dividend_strategy import DividendCaptureStrategy, DividendEvent
+from core.dividend_strategy import (
+    DividendCaptureStrategy, 
+    DividendEvent
+)
 from core.dividend_database import DividendDatabase
+from core.candle_fetcher import fetch_twelvedata_candles
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,10 @@ class DividendBacktester:
             (price_data.index >= start_date) & 
             (price_data.index <= end_date)
         ].copy()
+        
+        if backtest_prices.empty:
+            logger.error("No price data available for backtest period")
+            return self._calculate_performance_metrics()
         
         # Main backtest loop - process each trading day
         for current_date, day_prices in backtest_prices.iterrows():
@@ -559,8 +563,9 @@ class DividendBacktester:
         # Trade profit distribution
         ax3 = axes[1, 0]
         trade_profits = [t.profit_pct for t in results['trades']]
-        ax3.hist(trade_profits, bins=30, color='green', alpha=0.7, edgecolor='black')
-        ax3.axvline(x=0, color='red', linestyle='--', linewidth=2)
+        if trade_profits:
+            ax3.hist(trade_profits, bins=30, color='green', alpha=0.7, edgecolor='black')
+            ax3.axvline(x=0, color='red', linestyle='--', linewidth=2)
         ax3.set_title('Trade Profit Distribution')
         ax3.set_xlabel('Profit/Loss (%)')
         ax3.set_ylabel('Number of Trades')
@@ -568,21 +573,22 @@ class DividendBacktester:
         
         # Win rate by month
         ax4 = axes[1, 1]
-        trades_df = pd.DataFrame([{
-            'date': t.exit_date,
-            'profit': t.profit_loss > 0
-        } for t in results['trades']])
-        
-        if not trades_df.empty:
-            monthly_wins = trades_df.set_index('date').resample('M')['profit'].agg(['sum', 'count'])
-            monthly_wins['win_rate'] = monthly_wins['sum'] / monthly_wins['count'] * 100
+        if results['trades']:
+            trades_df = pd.DataFrame([{
+                'date': t.exit_date,
+                'profit': t.profit_loss > 0
+            } for t in results['trades'] if t.exit_date])
             
-            ax4.bar(monthly_wins.index, monthly_wins['win_rate'], color='blue', alpha=0.7)
-            ax4.axhline(y=50, color='red', linestyle='--', linewidth=1)
-            ax4.set_title('Monthly Win Rate')
-            ax4.set_xlabel('Month')
-            ax4.set_ylabel('Win Rate (%)')
-            ax4.grid(True, alpha=0.3)
+            if not trades_df.empty:
+                monthly_wins = trades_df.set_index('date').resample('M')['profit'].agg(['sum', 'count'])
+                monthly_wins['win_rate'] = monthly_wins['sum'] / monthly_wins['count'] * 100
+                
+                ax4.bar(monthly_wins.index, monthly_wins['win_rate'], color='blue', alpha=0.7)
+                ax4.axhline(y=50, color='red', linestyle='--', linewidth=1)
+                ax4.set_title('Monthly Win Rate')
+                ax4.set_xlabel('Month')
+                ax4.set_ylabel('Win Rate (%)')
+                ax4.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.show()
@@ -645,6 +651,43 @@ class DividendBacktester:
         return "\n".join(report)
 
 
+def fetch_price_data_for_backtest(symbol: str, start_date: datetime, 
+                                 end_date: datetime, api_keys: Dict) -> pd.DataFrame:
+    """
+    Fetch historical price data for backtesting.
+    Integrates with your existing data fetcher.
+    """
+    try:
+        # Fetch market data using your existing infrastructure
+        market_data = fetch_twelvedata_candles(symbol, api_keys)
+        
+        # Convert to DataFrame suitable for backtesting
+        df = pd.DataFrame({
+            'open': market_data['candlesticks'].get('open', []),
+            'high': market_data['candlesticks'].get('high', []),
+            'low': market_data['candlesticks'].get('low', []),
+            'close': market_data['candlesticks'].get('close', []),
+            'volume': market_data['candlesticks'].get('volume', [])
+        })
+        
+        # Add datetime index
+        if 'datetime' in market_data['candlesticks']:
+            df.index = pd.to_datetime(market_data['candlesticks']['datetime'])
+        else:
+            # Create synthetic dates if not provided
+            df.index = pd.date_range(end=datetime.now(), periods=len(df), freq='D')
+        
+        # Filter to date range if we have enough data
+        if not df.empty:
+            df = df[(df.index >= start_date) & (df.index <= end_date)]
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error fetching price data for backtest: {e}")
+        return pd.DataFrame()
+
+
 # Integration function for running backtests
 def run_dividend_backtest(symbol: str, start_date: datetime, end_date: datetime,
                         config: BacktestConfig = None) -> Dict:
@@ -654,12 +697,15 @@ def run_dividend_backtest(symbol: str, start_date: datetime, end_date: datetime,
     This function handles all the setup and execution, making it easy
     to test different configurations and time periods.
     """
-    from core.dividend_strategy import DividendCaptureStrategy, DividendDataFetcher
-    from config.env_loader import load_env_variables
+    from .dividend_strategy import DividendCaptureStrategy, DividendDataFetcher
+    from config import load_env_variables, trading_config
     
     # Load configuration
     api_keys = load_env_variables()
-    config = config or BacktestConfig()
+    
+    # Use provided config or create from trading_config
+    if config is None:
+        config = trading_config.get_backtest_config()
     
     # Initialize components
     strategy = DividendCaptureStrategy(symbol)
@@ -672,9 +718,12 @@ def run_dividend_backtest(symbol: str, start_date: datetime, end_date: datetime,
     # Get dividend history
     dividend_events = fetcher.fetch_dividend_history(symbol, years=5)
     
-    # Get price data (you'll need to implement this based on your data source)
-    # For now, using a placeholder
-    price_data = pd.DataFrame()  # Replace with actual price data fetching
+    # Get price data using the integrated fetcher
+    price_data = fetch_price_data_for_backtest(symbol, start_date, end_date, api_keys)
+    
+    if price_data.empty:
+        logger.error(f"No price data available for {symbol}")
+        return {}
     
     # Run backtest
     results = backtester.backtest_strategy(
@@ -689,21 +738,19 @@ def run_dividend_backtest(symbol: str, start_date: datetime, end_date: datetime,
     report = backtester.generate_report(results)
     print(report)
     
-    # Plot results
-    backtester.plot_results(results)
+    # Plot results if we have data
+    if results.get('trades'):
+        backtester.plot_results(results)
     
     return results
 
 
 if __name__ == "__main__":
-    # Example backtest
-    config = BacktestConfig(
-        initial_capital=100000,
-        commission_per_share=0.005,
-        max_position_pct=0.25,
-        min_dividend_yield=1.5,  # 6% annual
-        position_sizing_method='fixed'
-    )
+    # Example backtest using configuration from settings
+    from config import trading_config
+    
+    # Create BacktestConfig from trading_config
+    config = trading_config.get_backtest_config()
     
     # Run backtest for APAM
     results = run_dividend_backtest(

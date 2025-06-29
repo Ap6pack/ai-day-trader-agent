@@ -1,6 +1,9 @@
-#!/usr/bin/env python3
 import requests
+import logging
+from typing import Dict
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 def fetch_twelvedata_candles(symbol, intervals=("1min", "15min", "1h"), outputsize=100):
     """
@@ -88,3 +91,30 @@ def get_candlestick_data(symbol, intervals=("1min", "15min", "1h"), outputsize=5
         "twelvedata": td_data,
         "alphavantage": av_data
     }
+
+def fetch_realtime_quote(symbol: str, api_keys: Dict[str, str]) -> Dict:
+    """Fetch current market quote."""
+    alpha_key = api_keys.get('ALPHA_VANTAGE_API_KEY')
+    if alpha_key:
+        url = 'https://www.alphavantage.co/query'
+        params = {
+            'function': 'GLOBAL_QUOTE',
+            'symbol': symbol,
+            'apikey': alpha_key
+        }
+        
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
+            
+            if 'Global Quote' in data:
+                quote = data['Global Quote']
+                return {
+                    'current_price': float(quote.get('05. price', 0)),
+                    'previous_close': float(quote.get('08. previous close', 0)),
+                    'change_percent': quote.get('10. change percent', '0%')
+                }
+        except Exception as e:
+            logger.error(f"Quote fetch error: {e}")
+    
+    return {}

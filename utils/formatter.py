@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+def format_dividend_info(dividend_data: dict) -> str:
+    """Format dividend capture information."""
+    if not dividend_data:
+        return ""
+    
+    lines = ["\n**Dividend Capture Details:**"]
+    
+    if 'days_to_ex_dividend' in dividend_data:
+        lines.append(f"Days to Ex-Dividend: {dividend_data['days_to_ex_dividend']}")
+    
+    if 'expected_dividend' in dividend_data:
+        lines.append(f"Expected Dividend: ${dividend_data['expected_dividend']:.2f}")
+    
+    if 'capture_confidence' in dividend_data:
+        lines.append(f"Capture Confidence: {dividend_data['capture_confidence']:.1%}")
+    
+    return '\n'.join(lines)
+
 def format_basic_trade_recommendation(rec):
     """
     Format a basic trade recommendation dict for Discord output.
@@ -33,7 +51,13 @@ def format_analysis_result(result):
         lines.append(f"**Primary Strategy:** {result.get('primary_strategy', 'N/A').upper()}")
         lines.append(f"**Recommendation:** {result.get('recommendation', 'N/A').upper()}")
         lines.append(f"**Confidence:** {result.get('confidence', 'N/A')}")
-        lines.append(f"**Quantity:** {result.get('quantity', 'N/A')} shares")
+        # Enhanced quantity display with position value
+        quantity = result.get('quantity', 0)
+        if quantity > 0 and 'risk_parameters' in result and 'position_value' in result['risk_parameters']:
+            position_value = result['risk_parameters']['position_value']
+            lines.append(f"**Quantity:** {quantity} shares (${position_value:,.2f})")
+        else:
+            lines.append(f"**Quantity:** {quantity} shares")
         lines.append(f"**Reason:** {result.get('reason', 'N/A')}")
         
         # Add technical indicators if available
@@ -95,12 +119,11 @@ def format_analysis_result(result):
             if 'position_value' in risk:
                 lines.append(f"  Position Value: ${risk['position_value']}")
         
-        # Add dividend info if available
+        # Add dividend info if available using the dedicated formatter
         if 'dividend_info' in result:
-            div_info = result['dividend_info']
-            lines.append("\n**Dividend Information:**")
-            lines.append(f"  Days to Ex-Dividend: {div_info.get('days_to_ex_dividend', 'N/A')}")
-            lines.append(f"  Expected Dividend: ${div_info.get('expected_dividend', 'N/A')}")
+            dividend_formatted = format_dividend_info(result['dividend_info'])
+            if dividend_formatted:
+                lines.append(dividend_formatted)
         
         lines.append(f"\n**Analysis Time:** {result.get('timestamp', 'N/A')}")
         

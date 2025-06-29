@@ -52,15 +52,30 @@ pip install -r requirements.txt
 Create a `.env` file in the project root with the following keys:
 
 ```
+# Required API Keys
 DISCORD_BOT_TOKEN=your_discord_bot_token
 TWELVE_DATA_API_KEY=your_12data_api_key
 ALPHA_VANTAGE_API_KEY=your_alphavantage_api_key
 NEWS_API_KEY=your_newsapi_key
 OPENAI_API_KEY=your_openai_key
+
+# Optional Trading Configuration
+TRADING_CAPITAL=5000.0                    # Your trading capital in dollars
+MIN_POSITION_PERCENTAGE=0.02              # Minimum 2% of capital per trade
+MAX_POSITION_PERCENTAGE=0.10              # Maximum 10% of capital per trade
 ```
 
 **Never commit your `.env` file to version control.**  
 The `.gitignore` is configured to exclude `.env`, logs, and other sensitive or unnecessary files.
+
+### 4. Trading Capital Configuration
+
+The system uses **portfolio-based position sizing** that adapts to your actual trading capital:
+
+- **Default**: $5,000 trading capital
+- **Flexible**: Works whether you own 0, 5, 100, or 4,933 shares of any stock
+- **Risk-Managed**: Position sizes scale with signal confidence and market volatility
+- **Configurable**: Adjust via environment variables or config files
 
 ---
 
@@ -159,9 +174,17 @@ The system now provides comprehensive trading analysis with detailed insights:
 **Analysis Time:** 2025-06-29 02:03:46
 ```
 
-## Recent Major Updates (v2.0)
+## Recent Major Updates
 
-### 🔧 **Code Quality & Architecture**
+### 🎯 **v2.1.0 - Position Sizing Revolution**
+- **Fixed Critical "0 shares" Issue**: Completely redesigned position calculation system
+- **Portfolio-Based Sizing**: No longer assumes you own 100 shares of every stock
+- **Flexible Trading Capital**: Works with any current holdings (0, 5, 100, or 4,933 shares)
+- **Enhanced Output**: Shows both share quantity and dollar amount: "47 shares ($2,350.00)"
+- **Configurable Capital**: Set your trading capital via environment variables
+- **Risk-Adjusted Positions**: Scales with signal confidence and market volatility
+
+### 🔧 **v2.0.0 - Code Quality & Architecture**
 - **Fixed all import path issues**: Removed hacky `sys.path.append()` workarounds
 - **Enhanced config module**: Proper module exports and centralized configuration
 - **Resolved function name conflicts**: Clean, maintainable code structure

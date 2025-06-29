@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
+"""
+Central configuration management for AI Day Trader Agent.
+Provides easy access to all trading parameters and settings.
+"""
+
 import os
 from dotenv import load_dotenv
+from dataclasses import dataclass
+from typing import Optional
 
 load_dotenv()
 
@@ -15,51 +22,89 @@ TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-"""
-Configuration settings for the enhanced AI Day Trader Agent.
-"""
-
-from dataclasses import dataclass
-from typing import Optional
-
-DATABASE_PATH = os.getenv('DATABASE_PATH', str("data/dividend_trading.db"))
-
 @dataclass
 class TradingConfig:
-    """Main configuration for trading strategies."""
+    """Centralized trading configuration with environment variable support."""
     
-    # Position management
-    core_position_size: int = 100  # Your base APAM position
-    max_capture_position: int = 50  # Additional shares for dividend capture
-    max_portfolio_allocation: float = 0.25  # Max 25% in one stock
+    # Position Management
+    TRADING_CAPITAL: float = float(os.getenv('TRADING_CAPITAL', '5000.0'))
+    MIN_POSITION_PERCENTAGE: float = float(os.getenv('MIN_POSITION_PERCENTAGE', '0.02'))
+    MAX_POSITION_PERCENTAGE: float = float(os.getenv('MAX_POSITION_PERCENTAGE', '0.10'))
+    MAX_PORTFOLIO_ALLOCATION: float = float(os.getenv('MAX_PORTFOLIO_ALLOCATION', '0.25'))
     
-    # Dividend capture settings
-    min_dividend_yield_annual: float = 6.0  # Minimum 6% annual yield
-    dividend_capture_window_days: int = 7  # Start looking 7 days before ex-div
-    dividend_exit_window_days: int = 5  # Exit within 5 days after ex-div
+    # Dividend Capture Settings
+    MIN_DIVIDEND_YIELD_ANNUAL: float = float(os.getenv('MIN_DIVIDEND_YIELD', '6.0'))
+    DIVIDEND_CAPTURE_WINDOW_DAYS: int = int(os.getenv('DIVIDEND_CAPTURE_WINDOW_DAYS', '7'))
+    DIVIDEND_EXIT_WINDOW_DAYS: int = int(os.getenv('DIVIDEND_EXIT_WINDOW_DAYS', '5'))
     
-    # Risk management
-    stop_loss_percentage: float = 3.0  # 3% stop loss
-    position_sizing_method: str = 'fixed'  # or 'volatility', 'kelly'
-    max_daily_trades: int = 3  # Prevent overtrading
+    # Risk Management
+    STOP_LOSS_PERCENTAGE: float = float(os.getenv('STOP_LOSS_PCT', '3.0'))
+    POSITION_SIZING_METHOD: str = os.getenv('POSITION_SIZING_METHOD', 'fixed')
+    MAX_DAILY_TRADES: int = int(os.getenv('MAX_DAILY_TRADES', '3'))
     
-    # Technical indicators
-    rsi_oversold: float = 30.0
-    rsi_overbought: float = 70.0
-    macd_signal_threshold: float = 0.0
+    # Technical Indicators
+    RSI_OVERSOLD: float = float(os.getenv('RSI_OVERSOLD', '30.0'))
+    RSI_OVERBOUGHT: float = float(os.getenv('RSI_OVERBOUGHT', '70.0'))
+    MACD_SIGNAL_THRESHOLD: float = float(os.getenv('MACD_SIGNAL_THRESHOLD', '0.0'))
     
-    # Sentiment analysis
-    sentiment_threshold_bullish: float = 0.6
-    sentiment_threshold_bearish: float = -0.6
+    # Sentiment Analysis
+    SENTIMENT_THRESHOLD_BULLISH: float = float(os.getenv('SENTIMENT_THRESHOLD_BULLISH', '0.6'))
+    SENTIMENT_THRESHOLD_BEARISH: float = float(os.getenv('SENTIMENT_THRESHOLD_BEARISH', '-0.6'))
     
     # Backtesting
-    backtest_commission_per_share: float = 0.005
-    backtest_slippage_bps: int = 5
+    BACKTEST_COMMISSION_PER_SHARE: float = float(os.getenv('BACKTEST_COMMISSION_PER_SHARE', '0.005'))
+    BACKTEST_SLIPPAGE_BPS: int = int(os.getenv('BACKTEST_SLIPPAGE_BPS', '5'))
     
-    # API rate limits
-    api_calls_per_minute: int = 5
-    cache_expiry_minutes: int = 15
+    # API Settings
+    API_CALLS_PER_MINUTE: int = int(os.getenv('API_CALLS_PER_MINUTE', '5'))
+    CACHE_EXPIRY_MINUTES: int = int(os.getenv('CACHE_EXPIRY_MINUTES', '15'))
+    CANDLESTICK_LIMIT: int = int(os.getenv('CANDLESTICK_LIMIT', '500'))
+    
+    # Database
+    DATABASE_PATH: str = os.getenv('DATABASE_PATH', 'data/dividend_trading.db')
+    
+    # Logging
+    LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
+    LOG_FILE: str = os.getenv('LOG_FILE', 'logs/trading.log')
+    
+    def validate(self) -> bool:
+        """Validate configuration settings."""
+        validations = [
+            self.TRADING_CAPITAL > 0,
+            0 < self.MIN_POSITION_PERCENTAGE <= 1,
+            0 < self.MAX_POSITION_PERCENTAGE <= 1,
+            self.MIN_POSITION_PERCENTAGE <= self.MAX_POSITION_PERCENTAGE,
+            0 < self.MAX_PORTFOLIO_ALLOCATION <= 1,
+            self.MIN_DIVIDEND_YIELD_ANNUAL > 0,
+            self.STOP_LOSS_PERCENTAGE > 0,
+            self.POSITION_SIZING_METHOD in ['fixed', 'volatility', 'kelly'],
+        ]
+        return all(validations)
+    
+    def get_summary(self) -> dict:
+        """Get configuration summary for logging."""
+        return {
+            'position_settings': {
+                'trading_capital': f"${self.TRADING_CAPITAL:,.2f}",
+                'min_position': f"{self.MIN_POSITION_PERCENTAGE:.1%}",
+                'max_position': f"{self.MAX_POSITION_PERCENTAGE:.1%}",
+                'max_allocation': f"{self.MAX_PORTFOLIO_ALLOCATION:.1%}"
+            },
+            'dividend_settings': {
+                'min_yield': f"{self.MIN_DIVIDEND_YIELD_ANNUAL:.1f}%",
+                'capture_window': f"{self.DIVIDEND_CAPTURE_WINDOW_DAYS} days",
+                'exit_window': f"{self.DIVIDEND_EXIT_WINDOW_DAYS} days"
+            },
+            'risk_settings': {
+                'stop_loss': f"{self.STOP_LOSS_PERCENTAGE:.1f}%",
+                'sizing_method': self.POSITION_SIZING_METHOD,
+                'max_daily_trades': self.MAX_DAILY_TRADES
+            }
+        }
 
-
-# Load configuration
+# Global configuration instance
 trading_config = TradingConfig()
+
+# Validate on import
+if not trading_config.validate():
+    raise ValueError("Invalid trading configuration. Please check your settings.")

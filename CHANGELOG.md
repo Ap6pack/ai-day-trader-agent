@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [2.1.0] - 2025-06-29
+
+### 🎯 **Position Sizing Revolution: Portfolio-Based Trading Capital**
+
+#### Fixed
+- **Critical Position Sizing Issue**: Completely redesigned position calculation system
+  - **Removed hardcoded "core position" assumption** that required owning 100 shares of every stock
+  - **Eliminated "0 shares" recommendations** for SELL signals when not holding excess positions
+  - **Implemented flexible trading capital approach** that works with any current holdings (0, 5, 100, or 4,933 shares)
+
+#### Added
+- **Portfolio-Based Position Sizing** (`config/settings.py`):
+  - `TRADING_CAPITAL`: Configurable trading capital (default: $5,000)
+  - `MIN_POSITION_PERCENTAGE`: Minimum position size (default: 2% of capital)
+  - `MAX_POSITION_PERCENTAGE`: Maximum position size (default: 10% of capital)
+- **Enhanced Position Calculations** (`core/pipeline.py`):
+  - Dynamic position sizing based on signal confidence and market volatility
+  - Realistic share quantities calculated from dollar amounts and stock prices
+  - Intelligent lot sizing (rounds to 5s, 10s for larger positions)
+  - Minimum position logic (ensures at least 1 share for viable trades)
+- **Enhanced Output Formatting** (`utils/formatter.py`):
+  - Added `format_dividend_info()` function for dividend capture details
+  - Enhanced quantity display: "**Quantity:** 47 shares ($2,350.00)"
+  - Integrated dividend information formatting in analysis results
+
+#### Changed
+- **Position Tracker Simplification**: Removed complex "core + trading" position logic
+- **Realistic Trading Scenarios**: System now works for actual dividend stock trading
+- **Flexible Recommendations**: Adapts to user's actual capital and holdings
+
+#### Enhanced
+- **Trading Capital Management**: 
+  - High confidence signals (70%+): Up to 10% of capital
+  - Medium confidence signals (50-70%): 2-6% of capital
+  - Low confidence signals (<50%): 2% minimum allocation
+- **Risk-Adjusted Sizing**: Volatility factor reduces position sizes for volatile stocks
+- **User-Friendly Output**: Clear dollar amounts alongside share quantities
+
+---
+
 ## [2.0.0] - 2025-06-29
 
 ### 🚀 **Major Release: Enhanced Multi-Strategy Trading Intelligence**
