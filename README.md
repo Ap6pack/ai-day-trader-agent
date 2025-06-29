@@ -37,7 +37,7 @@ A sophisticated, multi-strategy AI-powered trading agent that combines technical
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/Ap6pack/ai-day-trader-agent.get
+git clone https://github.com/Ap6pack/ai-day-trader-agent.git
 cd ai-day-trader-agent
 ```
 
