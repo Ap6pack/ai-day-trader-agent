@@ -1,6 +1,10 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+#!/usr/bin/env python3
+"""
+Sentiment analysis module for news articles using OpenAI GPT models.
+
+This module analyzes the sentiment of financial news articles to provide
+trading signals based on market sentiment.
+"""
 
 import openai
 import json
@@ -23,7 +27,7 @@ def analyze_sentiment(articles):
     )
     try:
         response = openai.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4.1",
             messages=[
                 {"role": "system", "content": prompt}
             ],

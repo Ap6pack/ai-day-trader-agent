@@ -27,6 +27,16 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Documentation
+*.pdf
+
+# Databases
+*.db
+*.sqlite3
+
+# json files
+*.json
+
 # Virtual environments
 venv/
 ENV/

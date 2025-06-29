@@ -73,7 +73,7 @@ def fetch_alphavantage_candles(symbol, intervals=("1min", "15min", "1h"), output
             data[interval] = []
     return data
 
-def get_candlestick_data(symbol, intervals=("1min", "15min", "1h"), outputsize=100):
+def get_candlestick_data(symbol, intervals=("1min", "15min", "1h"), outputsize=500):
     """
     Fetch candlestick data from both Twelve Data and Alpha Vantage in parallel.
     Returns a dict:

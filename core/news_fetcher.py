@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""
+News fetcher module for retrieving financial news articles.
+
+This module fetches recent news articles for given stock symbols
+to support sentiment analysis for trading decisions.
+"""
 
 import requests
-from datetime import datetime, timezone , timedelta
+from datetime import datetime, timezone, timedelta
 from config import settings
 
 def get_news_articles(symbol):

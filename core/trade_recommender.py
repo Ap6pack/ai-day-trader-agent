@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""
+Trade recommendation module using OpenAI GPT models.
+
+This module generates trade recommendations based on technical indicators,
+candlestick data, and sentiment analysis using AI models.
+"""
 
 import openai
 import json
 from config import settings
+from utils.logger import get_logger
 
 def recommend_trade(symbol, candles, indicators, sentiment):
     """
@@ -27,7 +31,6 @@ def recommend_trade(symbol, candles, indicators, sentiment):
         f"Sentiment: {json.dumps(sentiment)}"
     )
     try:
-        from utils.logger import get_logger
         logger = get_logger("trade_recommender")
         response = openai.chat.completions.create(
             model="gpt-4.1",
@@ -57,7 +60,6 @@ def recommend_trade(symbol, candles, indicators, sentiment):
                 }
         return result
     except Exception as e:
-        from utils.logger import get_logger
         logger = get_logger("trade_recommender")
         logger.error(f"OpenAI call failed: {e}")
         return {

@@ -1,6 +1,25 @@
-discord.py==2.5.2
+# Core dependencies
+python-dotenv
 requests
 pandas
+numpy
 ta
 openai
-python-dotenv
+
+# Discord bot
+discord.py==2.5.2
+
+# Database
+# SQLite3 is included with Python
+
+# Machine Learning
+scikit-learn
+joblib
+
+# Data visualization (for backtesting)
+matplotlib
+seaborn
+
+# Additional utilities
+python-dateutil
+pytz
