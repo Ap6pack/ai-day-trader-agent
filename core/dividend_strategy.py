@@ -20,6 +20,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 import joblib
 import os
+import yfinance as yf
+
 
 logger = logging.getLogger(__name__)
 
@@ -715,9 +717,6 @@ class DividendDataFetcher:
     def _fetch_from_yahoo_finance(self, symbol: str, years: int) -> List[DividendEvent]:
         """Fetch dividend data from Yahoo Finance (free fallback)."""
         try:
-            import yfinance as yf
-            
-            # Create ticker object
             ticker = yf.Ticker(symbol)
             
             # Get dividend data
@@ -758,7 +757,6 @@ class DividendDataFetcher:
         
         # Get stock info for additional context
         try:
-            import yfinance as yf
             ticker = yf.Ticker(symbol)
             info = ticker.info
             current_price = info.get('currentPrice', info.get('regularMarketPrice', 100))
@@ -978,7 +976,6 @@ class DividendDataFetcher:
         
         # If no historical data or estimation failed, try to get current dividend info from Yahoo Finance
         try:
-            import yfinance as yf
             ticker = yf.Ticker(symbol)
             info = ticker.info
             

@@ -10,6 +10,7 @@ import numpy as np
 from datetime import datetime
 from typing import Dict
 import logging
+import yfinance as yf
 
 from core.dividend_strategy import (
     DividendCaptureStrategy, 
@@ -613,7 +614,6 @@ class EnhancedTradingPipeline:
             
             # Try to fetch a simple quote to validate the symbol exists
             try:
-                import yfinance as yf
                 ticker = yf.Ticker(symbol)
                 info = ticker.info
                 
