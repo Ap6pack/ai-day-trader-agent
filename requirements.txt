@@ -5,6 +5,7 @@ pandas
 numpy
 ta
 openai
+yfinance
 
 # Discord bot
 discord.py==2.5.2

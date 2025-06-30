@@ -63,6 +63,9 @@ OPENAI_API_KEY=your_openai_key
 TRADING_CAPITAL=5000.0                    # Your trading capital in dollars
 MIN_POSITION_PERCENTAGE=0.02              # Minimum 2% of capital per trade
 MAX_POSITION_PERCENTAGE=0.10              # Maximum 10% of capital per trade
+
+# Optional API Tier Configuration
+TWELVE_DATA_PREMIUM=auto                  # auto (detect), true (premium), false (free)
 ```
 
 **Never commit your `.env` file to version control.**  
@@ -147,42 +150,40 @@ The system now provides comprehensive trading analysis with detailed insights:
 
  Analysis Results:
 ----------------------------------------
-**Primary Strategy:** TECHNICAL
-**Recommendation:** BUY
-**Confidence:** 65.2%
-**Quantity:** 30 shares
-**Reason:** Technical: 2 bullish indicators
+**Primary Strategy:** SENTIMENT
+**Recommendation:** HOLD
+**Confidence:** 50.0%
+**Quantity:** 0 shares
+**Reason:** Sentiment score: 0.40
 
 **Technical Indicators:**
-  Current Price: $80.80
-  RSI: 35.37 (Oversold)
-  MACD: -0.4306 / Signal: -0.3197 (Bearish)
-  SMA(20): $73.49 Below
-  EMA(20): $73.21 Below
+  Current Price: $40.60
+  RSI: 50.99 (Neutral)
+  MACD: -0.0529 / Signal: -0.0547 (Bullish)
+  SMA(20): $40.61 Below
+  EMA(20): $40.54 Above
 
 **All Strategy Signals:**
-  Technical: BUY (strength: 0.60)
-  Sentiment: HOLD (score: 0.00)
-  Dividend: HOLD (reason: Outside capture window. Next dividend in 88 days)
+  Technical: HOLD (strength: 0.20)
+  Sentiment: HOLD (score: 0.40)
+  Dividend: HOLD (reason: Outside capture window. Next dividend in 46 days)
 
-**Risk Management:**
-  Stop Loss: $76.45
-  Take Profit: $85.15
-  Position Value: $2,424.00
-  Risk: 2.15%
-
-**Analysis Time:** 2025-06-29 02:03:46
+**Analysis Time:** 2025-06-29 19:58:52
 ```
 
 ## Recent Major Updates
 
-### 🎯 **v2.1.0 - Position Sizing Revolution**
+### 🎯 **v2.1.0 - Position Sizing Revolution & Triple-API Dividend System**
 - **Fixed Critical "0 shares" Issue**: Completely redesigned position calculation system
 - **Portfolio-Based Sizing**: No longer assumes you own 100 shares of every stock
 - **Flexible Trading Capital**: Works with any current holdings (0, 5, 100, or 4,933 shares)
 - **Enhanced Output**: Shows both share quantity and dollar amount: "47 shares ($2,350.00)"
 - **Configurable Capital**: Set your trading capital via environment variables
 - **Risk-Adjusted Positions**: Scales with signal confidence and market volatility
+- **Triple-API Dividend System**: Solved "No upcoming dividends found" issue
+  - **Primary**: Twelve Data (premium users get enhanced data)
+  - **Secondary**: Alpha Vantage (when not rate limited)
+  - **Fallback**: Yahoo Finance (free, unlimited access)
 
 ### 🔧 **v2.0.0 - Code Quality & Architecture**
 - **Fixed all import path issues**: Removed hacky `sys.path.append()` workarounds

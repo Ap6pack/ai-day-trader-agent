@@ -45,6 +45,14 @@ def format_analysis_result(result):
     """
     lines = []
     
+    # Handle error cases
+    if isinstance(result, dict) and result.get('error'):
+        lines.append(f"❌ **Error:** {result.get('message', 'Unknown error')}")
+        lines.append(f"**Symbol:** {result.get('symbol', 'N/A')}")
+        lines.append(f"**Error Type:** {result.get('error_type', 'unknown')}")
+        lines.append(f"**Time:** {result.get('timestamp', 'N/A')}")
+        return "\n".join(lines)
+    
     # Handle enhanced pipeline results
     if isinstance(result, dict) and 'primary_strategy' in result:
         # New enhanced format
@@ -114,10 +122,19 @@ def format_analysis_result(result):
                 lines.append(f"  Stop Loss: ${risk['stop_loss']}")
             if 'take_profit' in risk:
                 lines.append(f"  Take Profit: ${risk['take_profit']}")
-            if 'risk_percentage' in risk:
-                lines.append(f"  Risk: {risk['risk_percentage']}%")
-            if 'position_value' in risk:
+            
+            # Show actual position values if quantity > 0
+            if 'position_value' in risk and risk['position_value'] > 0:
                 lines.append(f"  Position Value: ${risk['position_value']}")
+                if 'risk_percentage' in risk:
+                    lines.append(f"  Risk: {risk['risk_percentage']}%")
+            else:
+                # Show theoretical values for HOLD signals
+                lines.append(f"  Position Value: $0.00 (No position)")
+                if 'theoretical_position_value' in risk:
+                    lines.append(f"  Theoretical Position (1 share): ${risk['theoretical_position_value']}")
+                if 'theoretical_risk' in risk:
+                    lines.append(f"  Theoretical Risk (1 share): ${risk['theoretical_risk']}")
         
         # Add dividend info if available using the dedicated formatter
         if 'dividend_info' in result:

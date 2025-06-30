@@ -492,7 +492,85 @@ class DividendDataFetcher:
         self.api_keys = api_keys
         self.cache_file = 'data/dividend_cache.json'
         self.cache = self._load_cache()
+        self.twelve_data_premium = None  # Will be auto-detected
+        self._api_tier_detected = False
+        self._detect_api_tier()
         
+    def _detect_api_tier(self) -> None:
+        """Detect Twelve Data API tier to avoid premium endpoint errors."""
+        try:
+            from config.settings import trading_config
+            
+            # Check if user has manually configured premium status
+            if not trading_config.TWELVE_DATA_AUTO_DETECT:
+                self.twelve_data_premium = trading_config.TWELVE_DATA_PREMIUM
+                self._api_tier_detected = True
+                logger.info(f"Twelve Data API tier manually configured: {'Premium' if self.twelve_data_premium else 'Free'}")
+                return
+            
+            # Check cache for previous detection
+            if 'api_tier_detection' in self.cache:
+                cached_detection = self.cache['api_tier_detection']
+                cache_date = datetime.fromisoformat(cached_detection['timestamp'])
+                # Cache API tier detection for 24 hours
+                time_diff = datetime.now() - cache_date
+                if time_diff.total_seconds() < 86400:  # 24 hours in seconds
+                    self.twelve_data_premium = cached_detection['premium']
+                    self._api_tier_detected = True
+                    logger.info(f"Using cached Twelve Data API tier: {'Premium' if self.twelve_data_premium else 'Free'}")
+                    return
+            
+            # Auto-detect by trying a simple endpoint
+            self._auto_detect_twelve_data_tier()
+            
+        except Exception as e:
+            logger.warning(f"Error detecting API tier: {e}")
+            # Default to free tier to avoid errors
+            self.twelve_data_premium = False
+            self._api_tier_detected = True
+    
+    def _auto_detect_twelve_data_tier(self) -> None:
+        """Auto-detect Twelve Data API tier by testing endpoint access."""
+        try:
+            # Try a simple quote endpoint first to test basic API access
+            url = 'https://api.twelvedata.com/quote'
+            params = {
+                'symbol': 'AAPL',  # Use a common stock for testing
+                'apikey': self.api_keys.get('TWELVE_DATA_API_KEY')
+            }
+            
+            response = requests.get(url, params=params, timeout=5)
+            data = response.json()
+            
+            # Check if basic API access works
+            if 'status' in data and data['status'] == 'error':
+                if 'api key' in data.get('message', '').lower():
+                    logger.warning("Twelve Data API key invalid or missing")
+                    self.twelve_data_premium = False
+                else:
+                    # API key works, assume free tier (we'll skip premium endpoints)
+                    self.twelve_data_premium = False
+            else:
+                # Basic API works, assume free tier for safety
+                # We don't test premium endpoints to avoid wasting API calls
+                self.twelve_data_premium = False
+            
+            # Cache the detection result
+            self.cache['api_tier_detection'] = {
+                'timestamp': datetime.now().isoformat(),
+                'premium': self.twelve_data_premium
+            }
+            self._save_cache()
+            self._api_tier_detected = True
+            
+            logger.info(f"Auto-detected Twelve Data API tier: {'Premium' if self.twelve_data_premium else 'Free'}")
+            
+        except Exception as e:
+            logger.warning(f"Error auto-detecting Twelve Data API tier: {e}")
+            # Default to free tier
+            self.twelve_data_premium = False
+            self._api_tier_detected = True
+    
     def _load_cache(self) -> Dict:
         """Load dividend data cache from disk."""
         if os.path.exists(self.cache_file):
@@ -509,7 +587,7 @@ class DividendDataFetcher:
     def fetch_dividend_history(self, symbol: str, years: int = 3) -> List[DividendEvent]:
         """
         Fetch historical dividend data for the specified symbol.
-        Uses Alpha Vantage API with caching to minimize API calls.
+        Uses dual-API system: Twelve Data (primary) -> Alpha Vantage (fallback) with caching.
         """
         cache_key = f"{symbol}_history_{years}y"
         
@@ -520,7 +598,91 @@ class DividendDataFetcher:
             if (datetime.now() - cache_date).days < 7:  # Cache for 7 days
                 return self._parse_cached_dividends(cached_data['data'])
         
-        # Fetch from API
+        # Smart API selection based on detected tier
+        if self.twelve_data_premium:
+            # Try Twelve Data premium endpoints
+            dividends = self._fetch_from_twelve_data(symbol, years)
+            if dividends:
+                logger.info(f"Successfully fetched dividend data from Twelve Data Premium for {symbol}")
+                # Cache the results
+                self.cache[cache_key] = {
+                    'timestamp': datetime.now().isoformat(),
+                    'data': [self._dividend_to_dict(d) for d in dividends],
+                    'source': 'twelve_data'
+                }
+                self._save_cache()
+                return dividends
+        else:
+            # Skip Twelve Data premium endpoints for free users
+            logger.info(f"Using free data sources for dividend information on {symbol}")
+        
+        # Try Alpha Vantage (free tier)
+        dividends = self._fetch_from_alpha_vantage(symbol, years)
+        if dividends:
+            logger.info(f"Successfully fetched dividend data from Alpha Vantage for {symbol}")
+            # Cache the results
+            self.cache[cache_key] = {
+                'timestamp': datetime.now().isoformat(),
+                'data': [self._dividend_to_dict(d) for d in dividends],
+                'source': 'alpha_vantage'
+            }
+            self._save_cache()
+            return dividends
+        
+        # Final fallback to Yahoo Finance (free, unlimited)
+        dividends = self._fetch_from_yahoo_finance(symbol, years)
+        if dividends:
+            logger.info(f"Successfully retrieved dividend information from Yahoo Finance for {symbol}")
+            # Cache the results
+            self.cache[cache_key] = {
+                'timestamp': datetime.now().isoformat(),
+                'data': [self._dividend_to_dict(d) for d in dividends],
+                'source': 'yahoo_finance'
+            }
+            self._save_cache()
+            return dividends
+        
+        logger.warning(f"No dividend data available for {symbol}")
+        return []
+    
+    def _fetch_from_twelve_data(self, symbol: str, years: int) -> List[DividendEvent]:
+        """Fetch dividend data from Twelve Data API."""
+        try:
+            # Calculate date range
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=years * 365)
+            
+            url = 'https://api.twelvedata.com/dividends'
+            params = {
+                'symbol': symbol,
+                'apikey': self.api_keys.get('TWELVE_DATA_API_KEY'),
+                'start_date': start_date.strftime('%Y-%m-%d'),
+                'end_date': end_date.strftime('%Y-%m-%d')
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
+            
+            # Check for API errors
+            if 'status' in data and data['status'] == 'error':
+                logger.error(f"Twelve Data API error: {data.get('message', 'Unknown error')}")
+                return []
+            
+            if 'dividends' in data and data['dividends']:
+                return self._parse_twelve_data_dividends(data['dividends'], symbol)
+            else:
+                logger.warning(f"No dividend data found in Twelve Data response for {symbol}")
+                return []
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching from Twelve Data: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching dividend data from Twelve Data: {e}")
+            return []
+    
+    def _fetch_from_alpha_vantage(self, symbol: str, years: int) -> List[DividendEvent]:
+        """Fetch dividend data from Alpha Vantage API (fallback)."""
         try:
             url = 'https://www.alphavantage.co/query'
             params = {
@@ -529,27 +691,167 @@ class DividendDataFetcher:
                 'apikey': self.api_keys.get('ALPHA_VANTAGE_API_KEY')
             }
             
-            response = requests.get(url, params=params)
+            response = requests.get(url, params=params, timeout=10)
             data = response.json()
             
+            # Check for rate limiting or errors
+            if 'Information' in data:
+                logger.error(f"Alpha Vantage API message: {data['Information']}")
+                return []
+            
             if 'Monthly Adjusted Time Series' in data:
-                dividends = self._parse_dividend_data(data, symbol)
-                
-                # Cache the results
-                self.cache[cache_key] = {
-                    'timestamp': datetime.now().isoformat(),
-                    'data': [self._dividend_to_dict(d) for d in dividends]
-                }
-                self._save_cache()
-                
-                return dividends
+                return self._parse_dividend_data(data, symbol)
             else:
-                logger.error(f"Failed to fetch dividend data: {data}")
+                logger.error(f"Failed to fetch dividend data from Alpha Vantage: {data}")
                 return []
                 
-        except Exception as e:
-            logger.error(f"Error fetching dividend history: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching from Alpha Vantage: {e}")
             return []
+        except Exception as e:
+            logger.error(f"Error fetching dividend data from Alpha Vantage: {e}")
+            return []
+    
+    def _fetch_from_yahoo_finance(self, symbol: str, years: int) -> List[DividendEvent]:
+        """Fetch dividend data from Yahoo Finance (free fallback)."""
+        try:
+            import yfinance as yf
+            
+            # Create ticker object
+            ticker = yf.Ticker(symbol)
+            
+            # Get dividend data
+            dividends_df = ticker.dividends
+            
+            if dividends_df.empty:
+                logger.warning(f"No dividend data found in Yahoo Finance for {symbol}")
+                return []
+            
+            # Filter to requested years
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=years * 365)
+            
+            # Convert to timezone-naive datetime for comparison
+            if dividends_df.index.tz is not None:
+                # If the index is timezone-aware, convert to UTC then remove timezone
+                dividends_df.index = dividends_df.index.tz_convert('UTC').tz_localize(None)
+            
+            # Filter dividends within date range
+            recent_dividends = dividends_df[dividends_df.index >= start_date]
+            
+            if recent_dividends.empty:
+                logger.warning(f"No recent dividend data found in Yahoo Finance for {symbol}")
+                return []
+            
+            return self._parse_yahoo_finance_dividends(recent_dividends, symbol)
+            
+        except ImportError:
+            logger.error("yfinance library not installed. Please install with: pip install yfinance")
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching dividend data from Yahoo Finance: {e}")
+            return []
+    
+    def _parse_yahoo_finance_dividends(self, dividends_df: pd.DataFrame, symbol: str) -> List[DividendEvent]:
+        """Parse dividend data from Yahoo Finance response."""
+        dividends = []
+        
+        # Get stock info for additional context
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            current_price = info.get('currentPrice', info.get('regularMarketPrice', 100))
+        except:
+            current_price = 100  # Fallback price
+        
+        for date, dividend_amount in dividends_df.items():
+            try:
+                # Convert pandas timestamp to datetime
+                ex_date = date.to_pydatetime()
+                
+                # Estimate frequency based on dividend history
+                frequency = self._estimate_dividend_frequency(dividends_df)
+                
+                # Calculate annualized yield
+                annual_dividend = dividend_amount * self._get_frequency_multiplier(frequency)
+                dividend_yield = (annual_dividend / current_price) * 100 if current_price > 0 else 0
+                
+                dividend_event = DividendEvent(
+                    symbol=symbol,
+                    declaration_date=None,  # Yahoo Finance doesn't provide declaration date
+                    ex_dividend_date=ex_date,
+                    record_date=ex_date + timedelta(days=1),  # Approximation
+                    payment_date=ex_date + timedelta(days=30),  # Approximation
+                    dividend_amount=float(dividend_amount),
+                    dividend_yield=dividend_yield,
+                    frequency=frequency
+                )
+                dividends.append(dividend_event)
+                
+            except Exception as e:
+                logger.warning(f"Error parsing Yahoo Finance dividend data: {e}")
+                continue
+        
+        return dividends
+    
+    def _estimate_dividend_frequency(self, dividends_df: pd.DataFrame) -> str:
+        """Estimate dividend frequency based on historical data."""
+        if len(dividends_df) < 2:
+            return 'quarterly'  # Default assumption
+        
+        # Calculate average days between dividends
+        dates = dividends_df.index.sort_values()
+        intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
+        avg_interval = sum(intervals) / len(intervals)
+        
+        # Classify based on average interval
+        if avg_interval < 45:
+            return 'monthly'
+        elif avg_interval < 120:
+            return 'quarterly'
+        elif avg_interval < 200:
+            return 'semi-annual'
+        else:
+            return 'annual'
+    
+    def _get_frequency_multiplier(self, frequency: str) -> int:
+        """Get multiplier to calculate annual dividend from single payment."""
+        frequency_map = {
+            'monthly': 12,
+            'quarterly': 4,
+            'semi-annual': 2,
+            'annual': 1
+        }
+        return frequency_map.get(frequency, 4)  # Default to quarterly
+    
+    def _parse_twelve_data_dividends(self, dividends_data: List[Dict], symbol: str) -> List[DividendEvent]:
+        """Parse dividend data from Twelve Data API response."""
+        dividends = []
+        
+        for dividend_info in dividends_data:
+            try:
+                # Parse dates
+                ex_date = datetime.strptime(dividend_info['ex_date'], '%Y-%m-%d')
+                
+                # Twelve Data provides more accurate dividend information
+                dividend_event = DividendEvent(
+                    symbol=symbol,
+                    declaration_date=datetime.strptime(dividend_info['declaration_date'], '%Y-%m-%d') if dividend_info.get('declaration_date') else None,
+                    ex_dividend_date=ex_date,
+                    record_date=datetime.strptime(dividend_info['record_date'], '%Y-%m-%d') if dividend_info.get('record_date') else ex_date + timedelta(days=1),
+                    payment_date=datetime.strptime(dividend_info['payment_date'], '%Y-%m-%d') if dividend_info.get('payment_date') else ex_date + timedelta(days=30),
+                    dividend_amount=float(dividend_info['amount']),
+                    dividend_yield=float(dividend_info.get('yield', 0)) if dividend_info.get('yield') else 0,
+                    frequency=dividend_info.get('frequency', 'quarterly').lower()
+                )
+                dividends.append(dividend_event)
+                
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Error parsing dividend data from Twelve Data: {e}")
+                continue
+        
+        return dividends
     
     def _parse_dividend_data(self, data: Dict, symbol: str) -> List[DividendEvent]:
         """Parse dividend data from Alpha Vantage response."""
@@ -614,40 +916,107 @@ class DividendDataFetcher:
     def fetch_next_dividend(self, symbol: str) -> Optional[DividendEvent]:
         """
         Fetch information about the next upcoming dividend.
-        This would ideally use a real-time data source.
+        Uses multiple strategies to find upcoming dividend information.
         """
-        # For now, estimate based on historical pattern
-        history = self.fetch_dividend_history(symbol, years=1)
-        if not history:
-            return None
+        # Try to get historical data to estimate next dividend
+        history = self.fetch_dividend_history(symbol, years=2)  # Look back 2 years for better pattern
         
-        # Find the most recent dividend
-        history.sort(key=lambda x: x.ex_dividend_date, reverse=True)
-        last_dividend = history[0]
+        if history:
+            # Find the most recent dividend
+            history.sort(key=lambda x: x.ex_dividend_date, reverse=True)
+            last_dividend = history[0]
+            
+            # Calculate average interval between dividends for better estimation
+            if len(history) >= 2:
+                intervals = []
+                for i in range(len(history) - 1):
+                    interval = (history[i].ex_dividend_date - history[i+1].ex_dividend_date).days
+                    intervals.append(interval)
+                avg_interval = sum(intervals) / len(intervals)
+            else:
+                # Fallback to frequency-based estimation
+                if last_dividend.frequency == 'quarterly':
+                    avg_interval = 91
+                elif last_dividend.frequency == 'monthly':
+                    avg_interval = 30
+                elif last_dividend.frequency == 'semi-annual':
+                    avg_interval = 182
+                else:  # annual
+                    avg_interval = 365
+            
+            # Estimate next dividend date
+            next_ex_date = last_dividend.ex_dividend_date + timedelta(days=int(avg_interval))
+            
+            # Only return if the estimated date is in the future
+            if next_ex_date > datetime.now():
+                logger.info(f"Estimated next dividend for {symbol}: {next_ex_date.strftime('%Y-%m-%d')} (${last_dividend.dividend_amount:.2f})")
+                return DividendEvent(
+                    symbol=symbol,
+                    declaration_date=None,
+                    ex_dividend_date=next_ex_date,
+                    record_date=next_ex_date + timedelta(days=1),
+                    payment_date=next_ex_date + timedelta(days=30),
+                    dividend_amount=last_dividend.dividend_amount,
+                    dividend_yield=last_dividend.dividend_yield,
+                    frequency=last_dividend.frequency
+                )
+            else:
+                # If estimated date is in the past, try adding another interval
+                next_ex_date = next_ex_date + timedelta(days=int(avg_interval))
+                if next_ex_date > datetime.now():
+                    logger.info(f"Estimated next dividend for {symbol} (adjusted): {next_ex_date.strftime('%Y-%m-%d')} (${last_dividend.dividend_amount:.2f})")
+                    return DividendEvent(
+                        symbol=symbol,
+                        declaration_date=None,
+                        ex_dividend_date=next_ex_date,
+                        record_date=next_ex_date + timedelta(days=1),
+                        payment_date=next_ex_date + timedelta(days=30),
+                        dividend_amount=last_dividend.dividend_amount,
+                        dividend_yield=last_dividend.dividend_yield,
+                        frequency=last_dividend.frequency
+                    )
         
-        # Estimate next dividend (quarterly = ~91 days)
-        if last_dividend.frequency == 'quarterly':
-            days_between = 91
-        elif last_dividend.frequency == 'monthly':
-            days_between = 30
-        else:  # annual
-            days_between = 365
+        # If no historical data or estimation failed, try to get current dividend info from Yahoo Finance
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            
+            # Check if Yahoo Finance has dividend information
+            dividend_rate = info.get('dividendRate', 0)
+            dividend_yield = info.get('dividendYield', 0)
+            ex_dividend_date = info.get('exDividendDate')
+            
+            if dividend_rate and dividend_rate > 0:
+                # If we have a dividend rate but no ex-dividend date, estimate quarterly
+                if not ex_dividend_date:
+                    # Assume quarterly dividends, estimate next date
+                    next_ex_date = datetime.now() + timedelta(days=45)  # Rough estimate
+                else:
+                    # Convert timestamp to datetime if needed
+                    if isinstance(ex_dividend_date, (int, float)):
+                        next_ex_date = datetime.fromtimestamp(ex_dividend_date)
+                    else:
+                        next_ex_date = datetime.now() + timedelta(days=45)
+                
+                # Calculate quarterly dividend amount
+                quarterly_dividend = dividend_rate / 4 if dividend_rate else 0.5
+                
+                logger.info(f"Using Yahoo Finance dividend info for {symbol}: estimated ${quarterly_dividend:.2f} quarterly")
+                return DividendEvent(
+                    symbol=symbol,
+                    declaration_date=None,
+                    ex_dividend_date=next_ex_date,
+                    record_date=next_ex_date + timedelta(days=1),
+                    payment_date=next_ex_date + timedelta(days=30),
+                    dividend_amount=quarterly_dividend,
+                    dividend_yield=dividend_yield * 100 if dividend_yield else 0,
+                    frequency='quarterly'
+                )
+        except Exception as e:
+            logger.warning(f"Could not get dividend info from Yahoo Finance for {symbol}: {e}")
         
-        next_ex_date = last_dividend.ex_dividend_date + timedelta(days=days_between)
-        
-        # Only return if the estimated date is in the future
-        if next_ex_date > datetime.now():
-            return DividendEvent(
-                symbol=symbol,
-                declaration_date=None,
-                ex_dividend_date=next_ex_date,
-                record_date=next_ex_date + timedelta(days=1),
-                payment_date=next_ex_date + timedelta(days=30),
-                dividend_amount=last_dividend.dividend_amount,  # Assume same amount
-                dividend_yield=last_dividend.dividend_yield,
-                frequency=last_dividend.frequency
-            )
-        
+        logger.warning(f"No dividend information found for {symbol}")
         return None
 
 

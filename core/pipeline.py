@@ -136,9 +136,31 @@ class EnhancedTradingPipeline:
         """
         logger.info(f"Running enhanced analysis for {self.symbol}")
         
+        # Validate ticker symbol first
+        validation_result = self._validate_ticker_symbol(self.symbol)
+        if not validation_result['valid']:
+            return {
+                'error': True,
+                'error_type': 'invalid_ticker',
+                'message': validation_result['message'],
+                'symbol': self.symbol,
+                'timestamp': datetime.now()
+            }
+        
         # Fetch all necessary data
         raw_market_data = get_candlestick_data(self.symbol)
         market_data = self._prepare_market_data_for_analysis(raw_market_data)
+        
+        # Check if we have valid market data
+        if not self._has_valid_market_data(market_data):
+            return {
+                'error': True,
+                'error_type': 'no_data',
+                'message': f"No market data available for {self.symbol}. This may be due to API rate limits or the symbol may not exist.",
+                'symbol': self.symbol,
+                'timestamp': datetime.now()
+            }
+        
         price_history = self._prepare_price_history(market_data)
         
         # Run traditional technical analysis
@@ -468,35 +490,68 @@ class EnhancedTradingPipeline:
     def _calculate_risk_parameters(self, signal: str, quantity: int,
                                  price_history: pd.DataFrame) -> Dict[str, float]:
         """Calculate risk management parameters for the trade."""
-        if signal == 'HOLD' or quantity == 0:
+        # Ensure we have price data
+        if len(price_history) == 0:
             return {}
         
-        current_price = price_history['close'].iloc[-1]
-        atr = self._calculate_atr(price_history)  # Average True Range
-        
-        if signal == 'BUY':
-            # Stop loss at 2 ATR below entry
-            stop_loss = current_price - (2 * atr)
-            # Take profit at 3 ATR above entry
-            take_profit = current_price + (3 * atr)
-        else:  # SELL
-            stop_loss = current_price + (2 * atr)
-            take_profit = current_price - (3 * atr)
-        
-        # Calculate position risk
-        position_value = quantity * current_price
-        risk_per_share = abs(current_price - stop_loss)
-        total_risk = quantity * risk_per_share
-        risk_percentage = (total_risk / position_value) * 100 if position_value > 0 else 0
-        
-        return {
-            'stop_loss': round(stop_loss, 2),
-            'take_profit': round(take_profit, 2),
-            'position_value': round(position_value, 2),
-            'total_risk': round(total_risk, 2),
-            'risk_percentage': round(risk_percentage, 2),
-            'risk_reward_ratio': round(abs(take_profit - current_price) / risk_per_share, 2)
-        }
+        try:
+            current_price = price_history['close'].iloc[-1]
+            atr = self._calculate_atr(price_history)  # Average True Range
+            
+            # Ensure ATR is valid
+            if pd.isna(atr) or atr <= 0:
+                atr = current_price * 0.02  # Fallback to 2% of price
+            
+            # Calculate theoretical risk parameters even for HOLD signals
+            if signal == 'BUY':
+                # Stop loss at 2 ATR below entry
+                stop_loss = current_price - (2 * atr)
+                # Take profit at 3 ATR above entry
+                take_profit = current_price + (3 * atr)
+            elif signal == 'SELL':
+                stop_loss = current_price + (2 * atr)
+                take_profit = current_price - (3 * atr)
+            else:  # HOLD - show theoretical BUY parameters for educational purposes
+                stop_loss = current_price - (2 * atr)
+                take_profit = current_price + (3 * atr)
+            
+            # Calculate position risk
+            if quantity > 0:
+                # Actual position calculations
+                position_value = quantity * current_price
+                risk_per_share = abs(current_price - stop_loss)
+                total_risk = quantity * risk_per_share
+                risk_percentage = (total_risk / position_value) * 100 if position_value > 0 else 0
+                
+                return {
+                    'stop_loss': round(stop_loss, 2),
+                    'take_profit': round(take_profit, 2),
+                    'position_value': round(position_value, 2),
+                    'total_risk': round(total_risk, 2),
+                    'risk_percentage': round(risk_percentage, 2),
+                    'risk_reward_ratio': round(abs(take_profit - current_price) / risk_per_share, 2) if risk_per_share > 0 else 0
+                }
+            else:
+                # For HOLD or 0 quantity, show theoretical parameters for minimum position
+                min_quantity = 1  # Minimum 1 share for educational purposes
+                position_value = min_quantity * current_price
+                risk_per_share = abs(current_price - stop_loss)
+                total_risk = min_quantity * risk_per_share
+                risk_percentage = (total_risk / position_value) * 100 if position_value > 0 else 0
+                
+                return {
+                    'stop_loss': round(stop_loss, 2),
+                    'take_profit': round(take_profit, 2),
+                    'position_value': 0.0,  # Show 0 since no actual position
+                    'total_risk': 0.0,     # Show 0 since no actual position
+                    'risk_percentage': 0.0, # Show 0 since no actual position
+                    'risk_reward_ratio': round(abs(take_profit - current_price) / risk_per_share, 2) if risk_per_share > 0 else 0,
+                    'theoretical_position_value': round(position_value, 2),  # Show what 1 share would cost
+                    'theoretical_risk': round(total_risk, 2)  # Show what 1 share would risk
+                }
+        except Exception as e:
+            logger.error(f"Error calculating risk parameters: {e}")
+            return {}
     
     def _calculate_atr(self, price_history: pd.DataFrame, period: int = 14) -> float:
         """Calculate Average True Range for volatility measurement."""
@@ -535,6 +590,89 @@ class EnhancedTradingPipeline:
             df.index = pd.to_datetime(candlesticks['datetime'])
         
         return df
+    
+    def _validate_ticker_symbol(self, symbol: str) -> Dict[str, any]:
+        """Validate if the ticker symbol is valid."""
+        try:
+            # Basic format validation
+            if not symbol or not isinstance(symbol, str):
+                return {
+                    'valid': False,
+                    'message': f"Invalid ticker format: '{symbol}'"
+                }
+            
+            # Clean the symbol
+            symbol = symbol.upper().strip()
+            
+            # Check basic format (letters only, 1-5 characters)
+            if not symbol.isalpha() or len(symbol) < 1 or len(symbol) > 5:
+                return {
+                    'valid': False,
+                    'message': f"Invalid ticker symbol: '{symbol}'. Ticker symbols should be 1-5 letters only."
+                }
+            
+            # Try to fetch a simple quote to validate the symbol exists
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                
+                # Check if we got valid info back
+                if not info or 'symbol' not in info or info.get('regularMarketPrice') is None:
+                    # Try to get some basic data
+                    hist = ticker.history(period="5d")
+                    if hist.empty:
+                        return {
+                            'valid': False,
+                            'message': f"Ticker symbol '{symbol}' not found or has no trading data. Please check the symbol and try again."
+                        }
+                
+                return {
+                    'valid': True,
+                    'message': f"Ticker symbol '{symbol}' is valid"
+                }
+                
+            except Exception as e:
+                # If Yahoo Finance fails, we'll be more lenient and let it through
+                # The market data validation will catch it later
+                logger.warning(f"Could not validate ticker {symbol} with Yahoo Finance: {e}")
+                return {
+                    'valid': True,
+                    'message': f"Ticker symbol '{symbol}' format is valid (could not verify with data source)"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error validating ticker symbol: {e}")
+            return {
+                'valid': False,
+                'message': f"Error validating ticker symbol: {str(e)}"
+            }
+    
+    def _has_valid_market_data(self, market_data: Dict) -> bool:
+        """Check if we have valid market data (not just dummy fallback data)."""
+        try:
+            candlesticks = market_data.get('candlesticks', {})
+            
+            # Check if we have price data
+            if not candlesticks or not candlesticks.get('close'):
+                return False
+            
+            close_prices = candlesticks['close']
+            
+            # Check if we have more than just the dummy fallback data
+            if len(close_prices) == 1 and close_prices[0] == 100.0:
+                # This looks like our dummy fallback data
+                return False
+            
+            # Check if we have reasonable price data
+            if len(close_prices) > 0 and all(price > 0 for price in close_prices):
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking market data validity: {e}")
+            return False
     
     def _record_decision(self, decision: Dict[str, any]) -> None:
         """Record trading decision for analysis and learning."""
@@ -605,7 +743,17 @@ def run_enhanced_analysis(symbol: str, api_keys: Dict[str, str]) -> Dict[str, an
     pipeline = EnhancedTradingPipeline(symbol)
     result = pipeline.run_analysis(api_keys)
     
-    # Format result for display
+    # Handle error cases
+    if result.get('error'):
+        return {
+            'error': True,
+            'error_type': result.get('error_type'),
+            'message': result.get('message'),
+            'symbol': result.get('symbol'),
+            'timestamp': result['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        }
+    
+    # Format successful result for display
     formatted_result = {
         'recommendation': result['signal'],
         'quantity': result['quantity'],

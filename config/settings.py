@@ -60,6 +60,10 @@ class TradingConfig:
     CACHE_EXPIRY_MINUTES: int = int(os.getenv('CACHE_EXPIRY_MINUTES', '15'))
     CANDLESTICK_LIMIT: int = int(os.getenv('CANDLESTICK_LIMIT', '500'))
     
+    # Twelve Data API Tier Detection
+    TWELVE_DATA_PREMIUM: bool = os.getenv('TWELVE_DATA_PREMIUM', 'auto').lower() in ['true', '1', 'yes']
+    TWELVE_DATA_AUTO_DETECT: bool = os.getenv('TWELVE_DATA_PREMIUM', 'auto').lower() == 'auto'
+    
     # Database
     DATABASE_PATH: str = os.getenv('DATABASE_PATH', 'data/dividend_trading.db')
     

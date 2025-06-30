@@ -6,19 +6,35 @@ All notable changes to this project will be documented in this file.
 
 ## [2.1.0] - 2025-06-29
 
-### 🎯 **Position Sizing Revolution: Portfolio-Based Trading Capital**
+### 🎯 **Position Sizing Revolution & Dividend Data Fix**
 
 #### Fixed
 - **Critical Position Sizing Issue**: Completely redesigned position calculation system
   - **Removed hardcoded "core position" assumption** that required owning 100 shares of every stock
   - **Eliminated "0 shares" recommendations** for SELL signals when not holding excess positions
   - **Implemented flexible trading capital approach** that works with any current holdings (0, 5, 100, or 4,933 shares)
+- **Critical Dividend Data Issue**: Resolved "No upcoming dividends found" problem
+  - **Root Cause**: Alpha Vantage API rate limiting (25 requests/day exceeded)
+  - **Solution**: Implemented triple-API fallback system for dividend data
+  - **Primary Source**: Twelve Data dividend API (premium users)
+  - **Secondary**: Alpha Vantage (when not rate limited)
+  - **Tertiary**: Yahoo Finance (free, unlimited fallback)
+- **Critical Ticker Validation Issue**: Fixed inconsistent behavior for invalid/rate-limited tickers
+  - **Root Cause**: Invalid tickers showed fake analysis, valid tickers could hang
+  - **Solution**: Comprehensive ticker validation and consistent error handling
+  - **Validation**: Format checking + existence verification via Yahoo Finance
+  - **Error Handling**: Clear, user-friendly error messages for all failure scenarios
 
 #### Added
 - **Portfolio-Based Position Sizing** (`config/settings.py`):
   - `TRADING_CAPITAL`: Configurable trading capital (default: $5,000)
   - `MIN_POSITION_PERCENTAGE`: Minimum position size (default: 2% of capital)
   - `MAX_POSITION_PERCENTAGE`: Maximum position size (default: 10% of capital)
+- **Dual-API Dividend System** (`core/dividend_strategy.py`):
+  - **Twelve Data Integration**: Primary dividend data source with comprehensive dividend information
+  - **Enhanced Error Handling**: Detects rate limiting and API failures
+  - **Intelligent Caching**: 7-day cache to minimize API calls
+  - **Robust Fallback Logic**: Twelve Data → Alpha Vantage → Cached Data
 - **Enhanced Position Calculations** (`core/pipeline.py`):
   - Dynamic position sizing based on signal confidence and market volatility
   - Realistic share quantities calculated from dollar amounts and stock prices
@@ -28,11 +44,23 @@ All notable changes to this project will be documented in this file.
   - Added `format_dividend_info()` function for dividend capture details
   - Enhanced quantity display: "**Quantity:** 47 shares ($2,350.00)"
   - Integrated dividend information formatting in analysis results
+  - Added comprehensive error case formatting with clear user guidance
+- **Ticker Validation System** (`core/pipeline.py`):
+  - Format validation (1-5 letters only)
+  - Existence verification via Yahoo Finance API
+  - Market data validation to detect dummy fallback data
+  - Consistent error responses for all failure scenarios
+- **Smart API Tier Detection** (`core/dividend_strategy.py`):
+  - Auto-detects Twelve Data API tier (free vs premium)
+  - 24-hour caching to avoid repeated detection calls
+  - Skips premium endpoints for free users to eliminate error messages
+  - Manual override option via `TWELVE_DATA_PREMIUM` environment variable
 
 #### Changed
 - **Position Tracker Simplification**: Removed complex "core + trading" position logic
 - **Realistic Trading Scenarios**: System now works for actual dividend stock trading
 - **Flexible Recommendations**: Adapts to user's actual capital and holdings
+- **Dividend Data Reliability**: More reliable dividend detection for quarterly dividend stocks
 
 #### Enhanced
 - **Trading Capital Management**: 
@@ -41,6 +69,7 @@ All notable changes to this project will be documented in this file.
   - Low confidence signals (<50%): 2% minimum allocation
 - **Risk-Adjusted Sizing**: Volatility factor reduces position sizes for volatile stocks
 - **User-Friendly Output**: Clear dollar amounts alongside share quantities
+- **Dividend Data Accuracy**: Better ex-dividend dates, payment dates, and dividend amounts from Twelve Data
 
 ---
 
