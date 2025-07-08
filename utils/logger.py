@@ -17,7 +17,10 @@ def get_logger(name="ai_day_trader"):
         ch.setFormatter(formatter)
         logger.addHandler(ch)
         # File handler
-        fh = logging.FileHandler("ai_day_trader.log")
+        import os
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(os.path.join(log_dir, "ai_day_trader.log"))
         fh.setFormatter(formatter)
         logger.addHandler(fh)
     return logger

@@ -84,7 +84,7 @@ The system uses **portfolio-based position sizing** that adapts to your actual t
 
 ## Usage
 
-### Portfolio Management (New in v3.0.0)
+### Portfolio Management
 
 #### Setup a Portfolio
 ```bash
@@ -127,6 +127,19 @@ python run.py --analyze-portfolio
 # Analyze specific portfolio
 python run.py --analyze-portfolio --portfolio my_portfolio
 ```
+
+### REST API Server
+
+The AI Day Trader Agent now includes a professional REST API with WebSocket support for real-time updates.
+
+#### API Features
+- **JWT Authentication**: Secure token-based authentication
+- **Portfolio Management**: Full CRUD operations via REST endpoints
+- **Real-time Updates**: WebSocket support for live portfolio updates
+- **Trading Analysis**: Run analysis on symbols and portfolios
+- **Interactive Documentation**: Available at `http://localhost:8000/docs`
+
+**📚 For complete API documentation, examples, and WebSocket usage, see [API_DOCUMENTATION.md](API_DOCUMENTATION.md)**
 
 ### Trade Analysis
 
@@ -215,46 +228,8 @@ The system now provides comprehensive trading analysis with detailed insights:
 **Analysis Time:** 2025-06-29 19:58:52
 ```
 
-## Recent Major Updates
-
-### 🎯 **v2.1.0 - Position Sizing Revolution & Triple-API Dividend System**
-- **Fixed Critical "0 shares" Issue**: Completely redesigned position calculation system
-- **Portfolio-Based Sizing**: No longer assumes you own 100 shares of every stock
-- **Flexible Trading Capital**: Works with any current holdings (0, 5, 100, or 4,933 shares)
-- **Enhanced Output**: Shows both share quantity and dollar amount: "47 shares ($2,350.00)"
-- **Configurable Capital**: Set your trading capital via environment variables
-- **Risk-Adjusted Positions**: Scales with signal confidence and market volatility
-- **Triple-API Dividend System**: Solved "No upcoming dividends found" issue
-  - **Primary**: Twelve Data (premium users get enhanced data)
-  - **Secondary**: Alpha Vantage (when not rate limited)
-  - **Fallback**: Yahoo Finance (free, unlimited access)
-
-### 🔧 **v2.0.0 - Code Quality & Architecture**
-- **Fixed all import path issues**: Removed hacky `sys.path.append()` workarounds
-- **Enhanced config module**: Proper module exports and centralized configuration
-- **Resolved function name conflicts**: Clean, maintainable code structure
-- **Professional Python patterns**: Proper relative imports throughout
-
-### 📈 **Enhanced Trading Intelligence**
-- **Multi-strategy signal fusion**: Intelligent combination of technical, sentiment, and dividend signals
-- **Advanced technical analysis**: Improved RSI, MACD, and moving average interpretation
-- **Comprehensive risk management**: Stop-loss, take-profit, and position sizing calculations
-- **Enhanced data processing**: 500+ candlesticks for robust indicator calculations
-
-### 🎯 **Improved Analysis Output**
-- **Detailed technical indicators**: Current price vs moving averages with trend analysis
-- **Signal strength metrics**: Quantified confidence levels for each strategy
-- **Risk parameters**: Complete risk management information for every trade
-- **Enhanced formatting**: Clear, actionable trading intelligence
-
-### 🛠 **Technical Improvements**
-- **Robust data conversion**: Handles both string and numeric API responses
-- **Better error handling**: Graceful fallbacks without breaking functionality
-- **Increased data volume**: 500 data points vs previous 100 for better analysis
-- **API reliability**: Enhanced dual-API system with improved fallback logic
-
 ---
 
 ## License
 
-MIT License. See LICENSE file for details.
+MIT License. See [LICENSE](LICENSE) file for details.

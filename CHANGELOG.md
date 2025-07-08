@@ -4,6 +4,78 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.1.0] - 2025-07-08
+
+### 🎯 **Phase 3: API Layer Development - Professional REST API & WebSockets**
+
+#### Added
+- **Professional FastAPI REST API** (`config/api/`):
+  - JWT-based authentication with access and refresh tokens
+  - Secure user registration and login system
+  - Complete portfolio management endpoints (CRUD operations)
+  - Holdings management with real-time market data
+  - Trade recording and history endpoints
+  - Performance metrics API
+  - Single and batch symbol analysis endpoints
+  - Asynchronous portfolio analysis with job tracking
+  - Comprehensive error handling and validation
+
+- **WebSocket Support** (`config/api/websockets.py`):
+  - Real-time portfolio updates
+  - Trade execution notifications
+  - Analysis progress updates
+  - Authenticated WebSocket connections
+  - Portfolio-specific subscriptions
+  - Connection management with automatic cleanup
+
+- **API Security Features**:
+  - OAuth2 password flow implementation
+  - Bcrypt password hashing
+  - JWT token authentication with expiration
+  - Role-based access control (admin/user)
+  - CORS configuration for web clients
+  - Input validation with Pydantic models
+  - SQL injection protection
+
+- **API Documentation** (`API_DOCUMENTATION.md`):
+  - Complete endpoint documentation
+  - Authentication flow examples
+  - WebSocket usage guide
+  - curl, Python, and JavaScript examples
+  - Error response documentation
+  - Security best practices
+
+- **API Server** (`api_server.py`):
+  - Production-ready server startup script
+  - Environment-based configuration
+  - Multi-worker support for production
+  - Auto-reload for development
+  - Security warnings for default secrets
+
+#### Enhanced
+- **Logging System** (`utils/logger.py`):
+  - Fixed log file location to only use `logs/` directory
+  - No more duplicate logs in project root
+  - Automatic log directory creation
+
+- **Requirements** (`requirements.txt`):
+  - Added FastAPI and dependencies
+  - Added uvicorn for ASGI server
+  - Added python-jose for JWT
+  - Added passlib for password hashing
+  - Added python-multipart for form data
+
+#### API Endpoints Summary
+- **Authentication**: Login, register, refresh tokens, user profile
+- **Portfolios**: List, create, read, update portfolios
+- **Holdings**: Get, add, update, remove holdings
+- **Trades**: Record trades, view history with filtering
+- **Performance**: Get portfolio performance metrics
+- **Analysis**: Analyze symbols, batch analysis, portfolio analysis
+- **WebSocket**: Real-time updates at `/ws`
+
+---
+
 ## [3.0.0] - 2025-07-08
 
 ### 🎯 **Phase 1: Database Foundation - Portfolio Management System**
