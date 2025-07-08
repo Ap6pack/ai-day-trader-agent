@@ -51,14 +51,41 @@ class EnhancedTradingPipeline:
     strength, timing, and market context.
     """
 
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, portfolio_name: str = "default"):
         self.symbol = symbol
+        self.portfolio_name = portfolio_name
         # Import trading config
         from config.settings import trading_config
         self.config = trading_config
         self.dividend_strategy = DividendCaptureStrategy(symbol, 100)  # Keep for compatibility
         self.position_tracker = PositionTracker(symbol)
         self.signal_history = []
+        
+        # Initialize portfolio manager for context
+        from core.portfolio_manager import PortfolioManager
+        self.portfolio_manager = PortfolioManager()
+        self._load_portfolio_context()
+    
+    def _load_portfolio_context(self):
+        """Load portfolio context and adjust trading parameters."""
+        portfolio = self.portfolio_manager.get_portfolio(self.portfolio_name)
+        if portfolio:
+            # Get current portfolio value and holdings
+            value_info = self.portfolio_manager.get_portfolio_value(self.portfolio_name)
+            holdings = self.portfolio_manager.get_holdings(self.portfolio_name)
+            
+            # Update trading capital to available cash
+            self.config.TRADING_CAPITAL = value_info['cash_available']
+            
+            # Update position tracker with current holdings
+            for holding in holdings:
+                if holding['symbol'] == self.symbol:
+                    self.position_tracker.current_position = holding['quantity']
+                    break
+            
+            logger.info(f"Loaded portfolio '{self.portfolio_name}': "
+                       f"Cash available: ${value_info['cash_available']:,.2f}, "
+                       f"Current position in {self.symbol}: {self.position_tracker.current_position} shares")
     
     def _prepare_market_data_for_analysis(self, raw_api_data: Dict) -> Dict:
         """Convert dual-API response to format expected by analysis methods."""
@@ -434,7 +461,12 @@ class EnhancedTradingPipeline:
                 primary_signal['signal'],
                 quantity,
                 price_history
-            )
+            ),
+            'portfolio_context': {
+                'portfolio_name': self.portfolio_name,
+                'cash_available': self.config.TRADING_CAPITAL,
+                'current_position': self.position_tracker.get_total_position()
+            }
         }
         
         return decision
@@ -476,8 +508,16 @@ class EnhancedTradingPipeline:
         # Convert to shares
         position_shares = int(position_value / current_price)
         
+        # For SELL signals, limit to current holdings
+        if signal == 'SELL':
+            current_holdings = self.position_tracker.get_total_position()
+            position_shares = min(position_shares, current_holdings)
+            if position_shares == 0 and current_holdings > 0:
+                # If we have holdings but calculated 0, sell at least 1 share
+                position_shares = min(1, current_holdings)
+        
         # Ensure minimum tradeable size (at least 1 share for small accounts)
-        if position_shares == 0 and position_value >= current_price * 0.5:
+        if signal == 'BUY' and position_shares == 0 and position_value >= current_price * 0.5:
             position_shares = 1
         
         # Round to reasonable lot sizes for larger positions
@@ -734,13 +774,13 @@ class PositionTracker:
 
 
 # Enhanced main execution function
-def run_enhanced_analysis(symbol: str, api_keys: Dict[str, str]) -> Dict[str, any]:
+def run_enhanced_analysis(symbol: str, api_keys: Dict[str, str], portfolio_name: str = "default") -> Dict[str, any]:
     """
     Main entry point for enhanced trading analysis.
     
     This replaces the original run_analysis function with our multi-strategy approach.
     """
-    pipeline = EnhancedTradingPipeline(symbol)
+    pipeline = EnhancedTradingPipeline(symbol, portfolio_name)
     result = pipeline.run_analysis(api_keys)
     
     # Handle error cases

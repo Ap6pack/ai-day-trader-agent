@@ -84,6 +84,64 @@ The system uses **portfolio-based position sizing** that adapts to your actual t
 
 ## Usage
 
+### Portfolio Management (New in v3.0.0)
+
+#### Setup a Portfolio
+```bash
+python run.py --setup-portfolio
+```
+Interactive wizard will guide you through creating a portfolio with trading capital and initial holdings.
+
+#### Portfolio Commands
+```bash
+# Show portfolio details
+python run.py --show-portfolio
+
+# List all portfolios
+python run.py --list-portfolios
+
+# Update trading capital
+python run.py --update-capital 10000
+
+# Add/update holdings
+python run.py --add-holding AAPL 100 --cost 150.00
+
+# Remove holdings
+python run.py --remove-holding AAPL
+
+# Record manual trades
+python run.py --record-trade AAPL BUY 50 155.00 --strategy technical --confidence 0.75
+
+# Show trade history
+python run.py --show-trades --days 30
+
+# Backup database
+python run.py --backup --output backups/portfolio_backup.db
+
+# Restore from backup
+python run.py --restore backups/portfolio_backup.db
+
+# Analyze entire portfolio
+python run.py --analyze-portfolio
+
+# Analyze specific portfolio
+python run.py --analyze-portfolio --portfolio my_portfolio
+```
+
+### Trade Analysis
+
+#### With Portfolio Context
+```bash
+# Analyze using default portfolio
+python run.py AAPL
+
+# Analyze with specific portfolio
+python run.py AAPL --portfolio my_portfolio
+
+# Override capital/holdings for single analysis
+python run.py AAPL --capital 10000 --holdings 50
+```
+
 ### Discord Bot
 
 Start the bot:
@@ -102,20 +160,6 @@ Example:
 
 ```
 !trade AAPL
-```
-
-### Command-Line Interface
-
-Run a trade analysis from the terminal:
-
-```bash
-python run.py <TICKER>
-```
-
-Example:
-
-```bash
-python run.py TSLA
 ```
 
 ---
