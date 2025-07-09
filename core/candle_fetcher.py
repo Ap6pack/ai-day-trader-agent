@@ -10,6 +10,10 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import yfinance as yf
 import time
+import random
+import os
+from collections import deque
+from threading import Lock
 
 from config import settings
 
@@ -21,6 +25,98 @@ class DataSource:
     TWELVE_DATA = "twelve_data"
     ALPHA_VANTAGE = "alpha_vantage"
     YAHOO_FINANCE = "yahoo_finance"
+
+
+class RateLimitConfig:
+    """Configuration for rate limiting from environment variables."""
+    TWELVE_DATA_RATE_LIMIT_WAIT = int(os.getenv('TWELVE_DATA_RATE_LIMIT_WAIT', '60'))
+    TWELVE_DATA_MAX_RETRIES = int(os.getenv('TWELVE_DATA_MAX_RETRIES', '3'))
+    TWELVE_DATA_CALLS_PER_MINUTE = int(os.getenv('TWELVE_DATA_CALLS_PER_MINUTE', '8'))
+    
+    ALPHA_VANTAGE_RATE_LIMIT_WAIT = int(os.getenv('ALPHA_VANTAGE_RATE_LIMIT_WAIT', '60'))
+    ALPHA_VANTAGE_MAX_RETRIES = int(os.getenv('ALPHA_VANTAGE_MAX_RETRIES', '3'))
+    ALPHA_VANTAGE_CALLS_PER_MINUTE = int(os.getenv('ALPHA_VANTAGE_CALLS_PER_MINUTE', '5'))
+    
+    # Exponential backoff settings
+    BACKOFF_FACTOR = float(os.getenv('API_BACKOFF_FACTOR', '2.0'))
+    MAX_BACKOFF_SECONDS = int(os.getenv('API_MAX_BACKOFF_SECONDS', '300'))
+    JITTER_ENABLED = os.getenv('API_JITTER_ENABLED', 'true').lower() == 'true'
+
+
+class RateLimiter:
+    """
+    Professional rate limiter with request tracking and exponential backoff.
+    Implements a sliding window approach for API call tracking.
+    """
+    
+    def __init__(self, calls_per_minute: int, source_name: str):
+        self.calls_per_minute = calls_per_minute
+        self.source_name = source_name
+        self.request_times = deque()
+        self.lock = Lock()
+        self.rate_limit_until = None
+        self.consecutive_rate_limits = 0
+        
+    def can_make_request(self) -> bool:
+        """Check if we can make a request without hitting rate limit."""
+        with self.lock:
+            now = datetime.now()
+            
+            # Check if we're in a rate limit cooldown period
+            if self.rate_limit_until and now < self.rate_limit_until:
+                return False
+            
+            # Remove requests older than 1 minute
+            cutoff_time = now - timedelta(minutes=1)
+            while self.request_times and self.request_times[0] < cutoff_time:
+                self.request_times.popleft()
+            
+            # Check if we can make another request
+            return len(self.request_times) < self.calls_per_minute
+    
+    def record_request(self):
+        """Record that a request was made."""
+        with self.lock:
+            self.request_times.append(datetime.now())
+            logger.debug(f"{self.source_name}: Recorded request. {len(self.request_times)}/{self.calls_per_minute} in last minute")
+    
+    def record_rate_limit(self, wait_seconds: Optional[int] = None):
+        """Record that we hit a rate limit."""
+        with self.lock:
+            self.consecutive_rate_limits += 1
+            
+            # Calculate backoff time
+            if wait_seconds:
+                backoff_time = wait_seconds
+            else:
+                # Exponential backoff with jitter
+                base_wait = RateLimitConfig.TWELVE_DATA_RATE_LIMIT_WAIT
+                backoff_time = min(
+                    base_wait * (RateLimitConfig.BACKOFF_FACTOR ** (self.consecutive_rate_limits - 1)),
+                    RateLimitConfig.MAX_BACKOFF_SECONDS
+                )
+                
+                # Add jitter to prevent thundering herd
+                if RateLimitConfig.JITTER_ENABLED:
+                    jitter = random.uniform(0, backoff_time * 0.1)
+                    backoff_time += jitter
+            
+            self.rate_limit_until = datetime.now() + timedelta(seconds=backoff_time)
+            logger.warning(f"{self.source_name}: Rate limited. Waiting {backoff_time:.1f}s until {self.rate_limit_until}")
+    
+    def reset_consecutive_limits(self):
+        """Reset consecutive rate limit counter after successful request."""
+        with self.lock:
+            self.consecutive_rate_limits = 0
+    
+    def get_wait_time(self) -> Optional[float]:
+        """Get seconds to wait before next request, or None if ready."""
+        with self.lock:
+            if self.rate_limit_until:
+                now = datetime.now()
+                if now < self.rate_limit_until:
+                    return (self.rate_limit_until - now).total_seconds()
+            return None
 
 
 class CandlestickDataFetcher:
@@ -38,6 +134,18 @@ class CandlestickDataFetcher:
             DataSource.YAHOO_FINANCE
         ]
         self._rate_limit_cache = {}
+        
+        # Initialize rate limiters
+        self.rate_limiters = {
+            DataSource.TWELVE_DATA: RateLimiter(
+                RateLimitConfig.TWELVE_DATA_CALLS_PER_MINUTE,
+                "TwelveData"
+            ),
+            DataSource.ALPHA_VANTAGE: RateLimiter(
+                RateLimitConfig.ALPHA_VANTAGE_CALLS_PER_MINUTE,
+                "AlphaVantage"
+            )
+        }
         
     def fetch_with_failover(self, symbol: str, intervals: Tuple[str, ...] = ("1min", "15min", "1h"), 
                            outputsize: int = 500) -> Dict[str, any]:
@@ -158,10 +266,11 @@ class CandlestickDataFetcher:
     
     def _fetch_twelvedata_candles(self, symbol: str, intervals: Tuple[str, ...], 
                                  outputsize: int) -> Dict[str, List[Dict]]:
-        """Fetch candlestick data from Twelve Data API."""
+        """Fetch candlestick data from Twelve Data API with rate limiting and retry logic."""
         if not self.twelve_data_key:
             raise ValueError("Twelve Data API key not configured")
             
+        rate_limiter = self.rate_limiters[DataSource.TWELVE_DATA]
         base_url = "https://api.twelvedata.com/time_series"
         data = {}
         
@@ -173,37 +282,88 @@ class CandlestickDataFetcher:
                 "apikey": self.twelve_data_key
             }
             
-            try:
-                resp = requests.get(base_url, params=params, timeout=10)
-                resp.raise_for_status()
-                result = resp.json()
-                
-                # Check for API errors
-                if result.get('status') == 'error':
-                    if 'api message' in result.get('message', '').lower():
-                        raise ValueError(f"API rate limit: {result.get('message')}")
-                    raise ValueError(f"API error: {result.get('message', 'Unknown error')}")
-                
-                if "values" in result and result["values"]:
-                    data[interval] = result["values"]
-                else:
-                    data[interval] = []
+            # Retry logic with rate limiting
+            for attempt in range(RateLimitConfig.TWELVE_DATA_MAX_RETRIES):
+                try:
+                    # Check if we need to wait due to rate limiting
+                    wait_time = rate_limiter.get_wait_time()
+                    if wait_time:
+                        logger.info(f"TwelveData: Waiting {wait_time:.1f}s due to rate limit...")
+                        time.sleep(wait_time)
                     
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Network error fetching {interval} from Twelve Data: {e}")
-                data[interval] = []
-            except Exception as e:
-                logger.error(f"Error fetching {interval} from Twelve Data: {e}")
-                raise
+                    # Check if we can make a request
+                    if not rate_limiter.can_make_request():
+                        logger.warning(f"TwelveData: Approaching rate limit, waiting 60s...")
+                        time.sleep(60)
+                    
+                    # Record the request
+                    rate_limiter.record_request()
+                    
+                    # Make the API request
+                    resp = requests.get(base_url, params=params, timeout=10)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    
+                    # Check for API errors
+                    if result.get('status') == 'error':
+                        error_msg = result.get('message', 'Unknown error')
+                        
+                        # Check if it's a rate limit error
+                        if 'api message' in error_msg.lower() or 'api credits' in error_msg.lower():
+                            # Extract wait time if provided
+                            wait_seconds = None
+                            if 'wait for the next minute' in error_msg.lower():
+                                wait_seconds = 60
+                            
+                            rate_limiter.record_rate_limit(wait_seconds)
+                            
+                            if attempt < RateLimitConfig.TWELVE_DATA_MAX_RETRIES - 1:
+                                wait_time = rate_limiter.get_wait_time()
+                                logger.warning(f"TwelveData rate limit hit: {error_msg}. Waiting {wait_time:.1f}s before retry...")
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                raise ValueError(f"API rate limit: {error_msg}")
+                        else:
+                            raise ValueError(f"API error: {error_msg}")
+                    
+                    # Success - reset consecutive limits counter
+                    rate_limiter.reset_consecutive_limits()
+                    
+                    if "values" in result and result["values"]:
+                        data[interval] = result["values"]
+                    else:
+                        data[interval] = []
+                    
+                    break  # Success, exit retry loop
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Network error fetching {interval} from Twelve Data: {e}")
+                    if attempt < RateLimitConfig.TWELVE_DATA_MAX_RETRIES - 1:
+                        time.sleep(5)  # Brief wait before network retry
+                        continue
+                    data[interval] = []
+                    break
+                except ValueError as e:
+                    # Re-raise ValueError (API errors) after logging
+                    logger.error(f"Error fetching {interval} from Twelve Data: {e}")
+                    raise
+                except Exception as e:
+                    logger.error(f"Unexpected error fetching {interval} from Twelve Data: {e}")
+                    if attempt < RateLimitConfig.TWELVE_DATA_MAX_RETRIES - 1:
+                        time.sleep(5)
+                        continue
+                    raise
                 
         return data
     
     def _fetch_alphavantage_candles(self, symbol: str, intervals: Tuple[str, ...], 
                                    outputsize: int) -> Dict[str, List[Dict]]:
-        """Fetch candlestick data from Alpha Vantage API."""
+        """Fetch candlestick data from Alpha Vantage API with rate limiting and retry logic."""
         if not self.alpha_vantage_key:
             raise ValueError("Alpha Vantage API key not configured")
             
+        rate_limiter = self.rate_limiters[DataSource.ALPHA_VANTAGE]
         base_url = "https://www.alphavantage.co/query"
         interval_map = {"1min": "1min", "15min": "15min", "1h": "60min"}
         data = {}
@@ -218,42 +378,83 @@ class CandlestickDataFetcher:
                 "apikey": self.alpha_vantage_key
             }
             
-            try:
-                resp = requests.get(base_url, params=params, timeout=10)
-                resp.raise_for_status()
-                result = resp.json()
-                
-                # Check for rate limiting
-                if 'Information' in result and 'api message' in result['Information'].lower():
-                    raise ValueError(f"API rate limit: {result['Information']}")
-                
-                # Check for errors
-                if 'Error Message' in result:
-                    raise ValueError(f"API error: {result['Error Message']}")
-                
-                key = f"Time Series ({av_interval})"
-                if key in result:
-                    # Convert to standard format
-                    candles = []
-                    for dt, values in sorted(result[key].items(), reverse=True)[:outputsize]:
-                        candles.append({
-                            "datetime": dt,
-                            "open": values.get("1. open"),
-                            "high": values.get("2. high"),
-                            "low": values.get("3. low"),
-                            "close": values.get("4. close"),
-                            "volume": values.get("5. volume")
-                        })
-                    data[interval] = candles
-                else:
-                    data[interval] = []
+            # Retry logic with rate limiting
+            for attempt in range(RateLimitConfig.ALPHA_VANTAGE_MAX_RETRIES):
+                try:
+                    # Check if we need to wait due to rate limiting
+                    wait_time = rate_limiter.get_wait_time()
+                    if wait_time:
+                        logger.info(f"AlphaVantage: Waiting {wait_time:.1f}s due to rate limit...")
+                        time.sleep(wait_time)
                     
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Network error fetching {interval} from Alpha Vantage: {e}")
-                data[interval] = []
-            except Exception as e:
-                logger.error(f"Error fetching {interval} from Alpha Vantage: {e}")
-                raise
+                    # Check if we can make a request
+                    if not rate_limiter.can_make_request():
+                        logger.warning(f"AlphaVantage: Approaching rate limit, waiting 60s...")
+                        time.sleep(60)
+                    
+                    # Record the request
+                    rate_limiter.record_request()
+                    
+                    # Make the API request
+                    resp = requests.get(base_url, params=params, timeout=10)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    
+                    # Check for rate limiting
+                    if 'Information' in result and 'api message' in result['Information'].lower():
+                        rate_limiter.record_rate_limit(RateLimitConfig.ALPHA_VANTAGE_RATE_LIMIT_WAIT)
+                        
+                        if attempt < RateLimitConfig.ALPHA_VANTAGE_MAX_RETRIES - 1:
+                            wait_time = rate_limiter.get_wait_time()
+                            logger.warning(f"AlphaVantage rate limit hit: {result['Information']}. Waiting {wait_time:.1f}s before retry...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            raise ValueError(f"API rate limit: {result['Information']}")
+                    
+                    # Check for errors
+                    if 'Error Message' in result:
+                        raise ValueError(f"API error: {result['Error Message']}")
+                    
+                    # Success - reset consecutive limits counter
+                    rate_limiter.reset_consecutive_limits()
+                    
+                    key = f"Time Series ({av_interval})"
+                    if key in result:
+                        # Convert to standard format
+                        candles = []
+                        for dt, values in sorted(result[key].items(), reverse=True)[:outputsize]:
+                            candles.append({
+                                "datetime": dt,
+                                "open": values.get("1. open"),
+                                "high": values.get("2. high"),
+                                "low": values.get("3. low"),
+                                "close": values.get("4. close"),
+                                "volume": values.get("5. volume")
+                            })
+                        data[interval] = candles
+                    else:
+                        data[interval] = []
+                    
+                    break  # Success, exit retry loop
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Network error fetching {interval} from Alpha Vantage: {e}")
+                    if attempt < RateLimitConfig.ALPHA_VANTAGE_MAX_RETRIES - 1:
+                        time.sleep(5)  # Brief wait before network retry
+                        continue
+                    data[interval] = []
+                    break
+                except ValueError as e:
+                    # Re-raise ValueError (API errors) after logging
+                    logger.error(f"Error fetching {interval} from Alpha Vantage: {e}")
+                    raise
+                except Exception as e:
+                    logger.error(f"Unexpected error fetching {interval} from Alpha Vantage: {e}")
+                    if attempt < RateLimitConfig.ALPHA_VANTAGE_MAX_RETRIES - 1:
+                        time.sleep(5)
+                        continue
+                    raise
                 
         return data
     

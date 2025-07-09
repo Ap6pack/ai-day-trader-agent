@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [3.2.0] - 2025-07-09
+
+### 🎯 **Intelligent API Rate Limiting - Professional Rate Limit Handling**
+
+#### Added
+- **Professional Rate Limiting System** (`core/candle_fetcher.py`):
+  - **RateLimitConfig class**: Centralized configuration from environment variables
+  - **RateLimiter class**: Thread-safe rate limiter with sliding window tracking
+  - Automatic detection of API rate limit errors
+  - Exponential backoff with configurable jitter
+  - Request tracking to prevent hitting limits proactively
+  - Automatic retry logic with configurable attempts
+
+- **Enhanced Data Fetching**:
+  - Both Twelve Data and Alpha Vantage now handle rate limits gracefully
+  - Automatic waiting and retry when rate limited
+  - Clear logging of rate limit events and wait times
+  - Seamless failover to alternative data sources when rate limited
+  - No more crashes from "API credits exceeded" errors
+
+- **Configuration Options** (via `.env`):
+  - `TWELVE_DATA_RATE_LIMIT_WAIT`: Seconds to wait when rate limited (default: 60)
+  - `TWELVE_DATA_MAX_RETRIES`: Maximum retry attempts (default: 3)
+  - `TWELVE_DATA_CALLS_PER_MINUTE`: Your API plan's limit (default: 8)
+  - `ALPHA_VANTAGE_RATE_LIMIT_WAIT`: Seconds to wait when rate limited (default: 60)
+  - `ALPHA_VANTAGE_MAX_RETRIES`: Maximum retry attempts (default: 3)
+  - `ALPHA_VANTAGE_CALLS_PER_MINUTE`: Your API plan's limit (default: 5)
+  - `API_BACKOFF_FACTOR`: Exponential backoff multiplier (default: 2.0)
+  - `API_MAX_BACKOFF_SECONDS`: Maximum wait time (default: 300)
+  - `API_JITTER_ENABLED`: Add randomness to prevent thundering herd (default: true)
+
+- **Test Script** (`test_rate_limiting.py`):
+  - Simple script to verify rate limiting functionality
+  - Shows rate limiting in action with clear output
+  - Useful for testing configuration changes
+
+#### Enhanced
+- **Error Handling**: Rate limit errors now trigger automatic retry instead of failure
+- **User Experience**: No more manual intervention needed for rate limits
+- **Logging**: Clear, informative messages about rate limiting and retry attempts
+- **Documentation**: Updated README with rate limiting configuration options
+
+#### Technical Details
+- **Sliding Window Algorithm**: Tracks requests within the last minute
+- **Thread-Safe Operations**: Uses locks to prevent race conditions
+- **Smart Backoff**: Exponential backoff prevents aggressive retrying
+- **Jitter Implementation**: Random delays prevent synchronized retries
+- **Graceful Degradation**: Falls back to other data sources when one is rate limited
+
+---
+
 ## [3.1.0] - 2025-07-08
 
 ### 🎯 **Phase 3: API Layer Development - Professional REST API & WebSockets**

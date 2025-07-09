@@ -30,6 +30,13 @@ A sophisticated, multi-strategy AI-powered trading agent that combines technical
 - Comprehensive error handling and logging
 - Production-ready configuration management
 
+### 🔄 **Intelligent Rate Limiting**
+- Automatic detection and handling of API rate limits
+- Exponential backoff with jitter for optimal retry timing
+- Request tracking to prevent hitting limits proactively
+- Configurable retry attempts and wait times
+- Seamless failover between data sources when rate limited
+
 ---
 
 ## Setup
@@ -66,6 +73,20 @@ MAX_POSITION_PERCENTAGE=0.10              # Maximum 10% of capital per trade
 
 # Optional API Tier Configuration
 TWELVE_DATA_PREMIUM=auto                  # auto (detect), true (premium), false (free)
+
+# API Rate Limiting Configuration
+TWELVE_DATA_RATE_LIMIT_WAIT=60           # Seconds to wait when rate limited
+TWELVE_DATA_MAX_RETRIES=3                # Max retry attempts
+TWELVE_DATA_CALLS_PER_MINUTE=8           # Your plan's limit
+
+ALPHA_VANTAGE_RATE_LIMIT_WAIT=60         # Seconds to wait when rate limited
+ALPHA_VANTAGE_MAX_RETRIES=3              # Max retry attempts
+ALPHA_VANTAGE_CALLS_PER_MINUTE=5         # Your plan's limit
+
+# Advanced Rate Limiting
+API_BACKOFF_FACTOR=2.0                   # Exponential backoff multiplier
+API_MAX_BACKOFF_SECONDS=300              # Maximum wait time (5 minutes)
+API_JITTER_ENABLED=true                  # Add randomness to prevent thundering herd
 ```
 
 **Never commit your `.env` file to version control.**  
