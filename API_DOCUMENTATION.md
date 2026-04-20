@@ -13,8 +13,9 @@
   - [Portfolio Endpoints](#portfolio-endpoints)
   - [Holdings Endpoints](#holdings-endpoints)
   - [Trade Endpoints](#trade-endpoints)
-  - [Performance Endpoints](#performance-endpoints)
+  - [Portfolio Summary Endpoints](#portfolio-summary-endpoints)
   - [Analysis Endpoints](#analysis-endpoints)
+  - [Trading Endpoints](#trading-endpoints)
   - [System Endpoints](#system-endpoints)
 - [WebSocket Endpoint](#websocket-endpoint)
   - [WebSocket Messages](#websocket-messages)
@@ -23,7 +24,7 @@
   - [2. Add Holdings](#2-add-holdings)
   - [3. Run Analysis](#3-run-analysis)
   - [4. Record a Trade](#4-record-a-trade)
-  - [5. Get Portfolio Performance](#5-get-portfolio-performance)
+  - [5. Get Portfolio Summary](#5-get-portfolio-summary)
 - [Error Responses](#error-responses)
 - [Rate Limiting](#rate-limiting)
 - [Security Considerations](#security-considerations)
@@ -89,7 +90,7 @@ API_HOST=0.0.0.0 API_PORT=8080 API_WORKERS=4 python api_server.py
 # Get access token
 TOKEN=$(curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin&password=secret" \
+  -d "username=<your_username>&password=<your_password>" \
   | jq -r '.access_token')
 
 # Use token in requests
@@ -97,11 +98,14 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/portfolios
 ```
 
-### Default Credentials
-- **Username**: admin
-- **Password**: secret
+### Admin Account
+Create an administrator explicitly before using protected endpoints:
 
-⚠️ **Security Warning**: Change default credentials and JWT secret in production!
+```bash
+python scripts/create_admin.py
+```
+
+For non-interactive deployment, set `ADMIN_USERNAME`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD` before running the script.
 
 ## Authentication
 
@@ -116,7 +120,7 @@ The API uses JWT (JSON Web Token) authentication. To access protected endpoints:
 POST /api/auth/login
 Content-Type: application/x-www-form-urlencoded
 
-username=admin&password=secret
+username=<your_username>&password=<your_password>
 ```
 
 Response:
@@ -126,6 +130,17 @@ Response:
   "refresh_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
   "token_type": "bearer",
   "expires_in": 1800
+}
+```
+
+### Refresh Token
+
+```http
+POST /api/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "eyJ0eXAiOiJKV1QiLCJhbGc..."
 }
 ```
 
@@ -162,7 +177,7 @@ Content-Type: application/json
 | POST | `/api/portfolios` | Create new portfolio |
 | GET | `/api/portfolios/{name}` | Get portfolio details |
 | PUT | `/api/portfolios/{name}` | Update portfolio |
-| DELETE | `/api/portfolios/{name}` | Delete portfolio (not implemented) |
+| DELETE | `/api/portfolios/{name}` | Delete portfolio and dependent local records |
 
 ### Holdings Endpoints
 
@@ -179,11 +194,11 @@ Content-Type: application/json
 | GET | `/api/portfolios/{name}/trades` | Get trade history |
 | POST | `/api/portfolios/{name}/trades` | Record new trade |
 
-### Performance Endpoints
+### Portfolio Summary Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/portfolios/{name}/performance` | Get performance metrics |
+| GET | `/api/portfolios/{name}/performance` | Get stock portfolio summary metrics |
 
 ### Analysis Endpoints
 
@@ -195,6 +210,15 @@ Content-Type: application/json
 | GET | `/api/analysis/portfolio/status/{job_id}` | Check analysis job status |
 | GET | `/api/analysis/portfolio/result/{job_id}` | Get analysis results |
 | DELETE | `/api/analysis/portfolio/job/{job_id}` | Delete completed job |
+
+### Trading Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/trading/provider-status` | Show market data provider order and configured providers without exposing secrets |
+| GET | `/api/trading/alpaca/account` | Check Alpaca paper account status, buying power, equity, and market clock |
+| POST | `/api/trading/paper-order` | Submit a direct BUY/SELL order to Alpaca paper trading |
+| POST | `/api/trading/analyze-and-paper-trade` | Run analysis and optionally submit an actionable result to Alpaca paper trading |
 
 ### System Endpoints
 
@@ -278,7 +302,7 @@ Analysis update:
 # Login first
 TOKEN=$(curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin&password=secret" \
+  -d "username=<your_username>&password=<your_password>" \
   | jq -r '.access_token')
 
 # Create portfolio
@@ -334,7 +358,7 @@ curl -X POST http://localhost:8000/api/portfolios/my_portfolio/trades \
   }'
 ```
 
-### 5. Get Portfolio Performance
+### 5. Get Portfolio Summary
 
 ```bash
 curl -X GET http://localhost:8000/api/portfolios/my_portfolio/performance \
@@ -416,7 +440,7 @@ curl http://localhost:8000/api/health
 # Login
 curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin&password=secret"
+  -d "username=<your_username>&password=<your_password>"
 ```
 
 ### Using Python
@@ -427,7 +451,7 @@ import requests
 # Login
 response = requests.post(
     "http://localhost:8000/api/auth/login",
-    data={"username": "admin", "password": "secret"}
+    data={"username": "<your_username>", "password": "<your_password>"}
 )
 token = response.json()["access_token"]
 
@@ -446,7 +470,7 @@ portfolios = requests.get(
 const loginResponse = await fetch('http://localhost:8000/api/auth/login', {
   method: 'POST',
   headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-  body: 'username=admin&password=secret'
+  body: 'username=<your_username>&password=<your_password>'
 });
 const { access_token } = await loginResponse.json();
 

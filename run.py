@@ -6,14 +6,12 @@ Now includes portfolio management, dividend capture capabilities, and multi-stra
 
 import sys
 import argparse
-import logging
-from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from config.env_loader import load_env_variables
-from core.pipeline import run_enhanced_analysis, EnhancedTradingPipeline
+from core.pipeline import EnhancedTradingPipeline
 from core.portfolio_manager import PortfolioManager
-from core.dividend_database import DividendDatabase
+from core.trading_workflow import TradingWorkflow
 from utils.logger import get_logger
 from utils.formatter import format_analysis_result
 
@@ -403,66 +401,48 @@ class PortfolioCLI:
 
 def run_analysis(ticker: str, portfolio_name: str = "default", 
                 override_capital: Optional[float] = None,
-                override_holdings: Optional[int] = None):
+                override_holdings: Optional[int] = None,
+                record_paper_trade: bool = False,
+                paper_trade: bool = False):
     """Run trading analysis with portfolio context."""
     try:
-        # Load API keys
-        api_keys = load_env_variables()
-        
         # Initialize portfolio manager
         pm = PortfolioManager()
-        
-        # Get portfolio context
-        portfolio = pm.get_portfolio(portfolio_name)
-        if not portfolio and portfolio_name != "default":
-            print(f"\n⚠️  Portfolio '{portfolio_name}' not found, using defaults")
-        
-        # Initialize pipeline with portfolio context
-        pipeline = EnhancedTradingPipeline(ticker)
-        
-        # Override capital/holdings if specified
-        if override_capital:
-            pipeline.config.TRADING_CAPITAL = override_capital
-        elif portfolio:
-            value_info = pm.get_portfolio_value(portfolio_name)
-            pipeline.config.TRADING_CAPITAL = value_info['cash_available']
-        
-        # Run analysis
+        workflow = TradingWorkflow(pm)
+
+        if override_capital or override_holdings is not None:
+            print("\n⚠️  --capital and --holdings are deprecated in the optimized workflow.")
+            print("   Use a portfolio with --add-holding/--update-capital instead.")
+
         print(f"\n🤖 AI Day Trader Agent - Analysis for {ticker}")
         print(f"📊 Portfolio: {portfolio_name}")
         print("=" * 60)
-        
-        result = pipeline.run_analysis(api_keys)
+
+        workflow_result = workflow.run(
+            ticker,
+            portfolio_name,
+            record_paper_trade=record_paper_trade,
+            submit_alpaca_paper_order=paper_trade,
+        )
+        result = workflow_result.analysis
         
         # Display formatted results
         print("\n📊 Analysis Results:")
         print("-" * 40)
         formatted_output = format_analysis_result(result)
         print(formatted_output)
-        
-        # If it's a BUY/SELL recommendation, ask about execution
-        if result['signal'] in ['BUY', 'SELL'] and result['quantity'] > 0:
-            print(f"\n💡 Recommendation: {result['signal']} {result['quantity']} shares")
-            
-            if portfolio:
-                execute = input("\nExecute this trade? (y/N): ").lower() == 'y'
-                if execute:
-                    # Get current price (use last close as approximation)
-                    current_price = result.get('all_signals', {}).get('technical', {}).get('current_price', 0)
-                    if current_price > 0:
-                        trade_id = pm.record_trade(
-                            name=portfolio_name,
-                            symbol=ticker,
-                            action=result['signal'],
-                            quantity=result['quantity'],
-                            price=current_price,
-                            strategy=result['primary_strategy'],
-                            confidence=float(result['confidence'].rstrip('%')) / 100,
-                            notes=f"Auto-executed: {result['primary_reason']}"
-                        )
-                        print(f"\n✅ Trade executed (ID: {trade_id})")
-                    else:
-                        print("\n❌ Could not execute: price unavailable")
+
+        if workflow_result.alpaca_order:
+            order = workflow_result.alpaca_order
+            print("\n✅ Alpaca paper order submitted")
+            print(f"   Order ID: {order.get('id')}")
+            print(f"   Status: {order.get('status', 'unknown')}")
+            if workflow_result.recorded_trade_id:
+                print(f"   Local trade record ID: {workflow_result.recorded_trade_id}")
+        elif workflow_result.recorded_trade_id:
+            print(f"\n✅ Local paper trade recorded (ID: {workflow_result.recorded_trade_id})")
+        elif (record_paper_trade or paper_trade) and workflow_result.skipped_reason:
+            print(f"\nℹ️  Paper trade skipped: {workflow_result.skipped_reason}")
         
         print("\n✅ Analysis complete!")
         
@@ -484,6 +464,12 @@ Examples:
   
   # Analyze with specific portfolio
   python run.py AAPL --portfolio my_portfolio
+
+  # Analyze and submit an actionable recommendation to Alpaca paper trading
+  python run.py AAPL --portfolio my_portfolio --paper-trade
+
+  # Analyze and record locally without submitting an Alpaca order
+  python run.py AAPL --portfolio my_portfolio --record-paper-trade
   
   # Setup a new portfolio
   python run.py --setup-portfolio
@@ -507,6 +493,10 @@ Examples:
     parser.add_argument('--portfolio', '-p', help='Portfolio name (default: "default")')
     parser.add_argument('--capital', type=float, help='Override trading capital')
     parser.add_argument('--holdings', type=int, help='Override current holdings')
+    parser.add_argument('--paper-trade', action='store_true',
+                        help='Submit actionable BUY/SELL analysis result to Alpaca paper trading')
+    parser.add_argument('--record-paper-trade', action='store_true',
+                        help='Record actionable BUY/SELL analysis result locally without submitting to Alpaca')
     
     # Portfolio management commands
     parser.add_argument('--setup-portfolio', action='store_true', help='Interactive portfolio setup')
@@ -578,7 +568,9 @@ Examples:
             args.ticker.upper(),
             args.portfolio or "default",
             args.capital,
-            args.holdings
+            args.holdings,
+            args.record_paper_trade,
+            args.paper_trade
         )
     else:
         # No command specified

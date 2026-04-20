@@ -4,10 +4,14 @@ Enhanced Discord bot interface for the AI Day Trader Agent.
 Now supports dividend capture strategies and detailed trade analysis.
 """
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import discord
 from discord.ext import commands
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from config.env_loader import load_env_variables
 from core.pipeline import run_enhanced_analysis
 from core.dividend_database import DividendDatabase
@@ -78,7 +82,7 @@ async def trade_analysis(ctx, ticker: str = None):
             title=f"{emoji} {ticker} Analysis Complete",
             description=f"**Recommendation:** {result['recommendation']} {result['quantity']} shares",
             color=color,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
         
         # Add main analysis fields

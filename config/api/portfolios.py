@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import BaseModel, Field, validator
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import sys
 import os
 
@@ -18,16 +19,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from core.portfolio_manager import PortfolioManager
 from config.api.auth import get_current_active_user, User
+from config.api.dependencies import get_portfolio_manager
 
 # Logging
 logger = logging.getLogger(__name__)
 
 # Router
 router = APIRouter()
-
-# Initialize portfolio manager
-portfolio_manager = PortfolioManager()
-
 
 # Pydantic models for request/response validation
 class PortfolioCreate(BaseModel):
@@ -45,33 +43,35 @@ class PortfolioUpdate(BaseModel):
 
 class PortfolioResponse(BaseModel):
     """Portfolio response model"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     trading_capital: float
-    description: Optional[str]
+    description: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     total_value: float
     cash_available: float
     holdings_value: float
-    
-    class Config:
-        orm_mode = True
 
 
 class HoldingCreate(BaseModel):
     """Model for adding/updating holdings"""
-    symbol: str = Field(..., min_length=1, max_length=10, regex="^[A-Z]+$")
+    symbol: str = Field(..., min_length=1, max_length=10, pattern="^[A-Z]+$")
     quantity: int = Field(..., gt=0, description="Number of shares")
     avg_cost: Optional[float] = Field(None, gt=0, description="Average cost per share")
     
-    @validator('symbol')
-    def uppercase_symbol(cls, v):
+    @field_validator('symbol', mode='before')
+    @classmethod
+    def uppercase_symbol(cls, v: str) -> str:
         return v.upper()
 
 
 class HoldingResponse(BaseModel):
     """Holding response model"""
+    model_config = ConfigDict(from_attributes=True)
+
     symbol: str
     quantity: int
     avg_cost: float
@@ -79,32 +79,33 @@ class HoldingResponse(BaseModel):
     market_value: float
     unrealized_pnl: float
     unrealized_pnl_pct: float
-    
-    class Config:
-        orm_mode = True
 
 
 class TradeCreate(BaseModel):
     """Model for recording trades"""
-    symbol: str = Field(..., min_length=1, max_length=10, regex="^[A-Z]+$")
-    action: str = Field(..., regex="^(BUY|SELL)$", description="Trade action: BUY or SELL")
+    symbol: str = Field(..., min_length=1, max_length=10, pattern="^[A-Z]+$")
+    action: str = Field(..., pattern="^(BUY|SELL)$", description="Trade action: BUY or SELL")
     quantity: int = Field(..., gt=0, description="Number of shares")
     price: float = Field(..., gt=0, description="Price per share")
     strategy: Optional[str] = Field(None, max_length=50, description="Trading strategy used")
     confidence: Optional[float] = Field(None, ge=0, le=1, description="Confidence score (0-1)")
     notes: Optional[str] = Field(None, max_length=500, description="Trade notes")
     
-    @validator('symbol')
-    def uppercase_symbol(cls, v):
+    @field_validator('symbol', mode='before')
+    @classmethod
+    def uppercase_symbol(cls, v: str) -> str:
         return v.upper()
     
-    @validator('action')
-    def uppercase_action(cls, v):
+    @field_validator('action', mode='before')
+    @classmethod
+    def uppercase_action(cls, v: str) -> str:
         return v.upper()
 
 
 class TradeResponse(BaseModel):
     """Trade response model"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     portfolio_id: int
     symbol: str
@@ -116,35 +117,33 @@ class TradeResponse(BaseModel):
     confidence: Optional[float]
     notes: Optional[str]
     timestamp: datetime
-    
-    class Config:
-        orm_mode = True
 
 
-class PerformanceMetrics(BaseModel):
-    """Portfolio performance metrics"""
+class PortfolioSummaryMetrics(BaseModel):
+    """Stock portfolio summary metrics."""
     total_return: float
     total_return_pct: float
     realized_pnl: float
     unrealized_pnl: float
-    win_rate: float
     total_trades: int
-    winning_trades: int
-    losing_trades: int
-    avg_win: float
-    avg_loss: float
-    sharpe_ratio: Optional[float]
-    max_drawdown: Optional[float]
+    buy_trades: int
+    sell_trades: int
+    total_fees: float
 
 
 # Helper function to get user's portfolio
 async def get_user_portfolio(
     portfolio_name: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ) -> dict:
     """Get portfolio for authenticated user"""
-    # In production, filter by user ID
-    portfolio = portfolio_manager.get_portfolio(portfolio_name)
+    await run_in_threadpool(db.claim_unowned_portfolios, current_user.id)
+    portfolio = await run_in_threadpool(
+        db.get_portfolio,
+        portfolio_name,
+        current_user.id,
+    )
     if not portfolio:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -156,19 +155,25 @@ async def get_user_portfolio(
 # API Endpoints
 @router.get("/", response_model=List[PortfolioResponse])
 async def list_portfolios(
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     List all portfolios for the authenticated user.
     """
     try:
-        # In production, filter by user ID
-        portfolios = portfolio_manager.list_portfolios()
+        await run_in_threadpool(db.claim_unowned_portfolios, current_user.id)
+        portfolios = await run_in_threadpool(db.list_portfolios, current_user.id)
         
         # Enrich with current values
         enriched_portfolios = []
         for portfolio in portfolios:
-            value_info = portfolio_manager.get_portfolio_value(portfolio['name'])
+            value_info = await run_in_threadpool(
+                db.get_portfolio_value,
+                portfolio['name'],
+                None,
+                current_user.id,
+            )
             enriched_portfolio = {
                 **portfolio,
                 'total_value': value_info['total_value'],
@@ -189,14 +194,19 @@ async def list_portfolios(
 @router.post("/", response_model=PortfolioResponse, status_code=status.HTTP_201_CREATED)
 async def create_portfolio(
     portfolio_data: PortfolioCreate,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Create a new portfolio.
     """
     try:
         # Check if portfolio name already exists
-        existing = portfolio_manager.get_portfolio(portfolio_data.name)
+        existing = await run_in_threadpool(
+            db.get_portfolio,
+            portfolio_data.name,
+            current_user.id,
+        )
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -204,13 +214,20 @@ async def create_portfolio(
             )
         
         # Create portfolio
-        portfolio = portfolio_manager.create_portfolio(
+        portfolio = await run_in_threadpool(
+            db.create_portfolio,
             name=portfolio_data.name,
-            trading_capital=portfolio_data.trading_capital
+            trading_capital=portfolio_data.trading_capital,
+            user_id=current_user.id,
         )
         
         # Get value info
-        value_info = portfolio_manager.get_portfolio_value(portfolio_data.name)
+        value_info = await run_in_threadpool(
+            db.get_portfolio_value,
+            portfolio_data.name,
+            None,
+            current_user.id,
+        )
         
         return {
             **portfolio,
@@ -232,13 +249,19 @@ async def create_portfolio(
 @router.get("/{portfolio_name}", response_model=PortfolioResponse)
 async def get_portfolio(
     portfolio_name: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Get portfolio details by name.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
-    value_info = portfolio_manager.get_portfolio_value(portfolio_name)
+    portfolio = await get_user_portfolio(portfolio_name, current_user, db)
+    value_info = await run_in_threadpool(
+        db.get_portfolio_value,
+        portfolio_name,
+        None,
+        current_user.id,
+    )
     
     return {
         **portfolio,
@@ -253,19 +276,22 @@ async def get_portfolio(
 async def update_portfolio(
     portfolio_name: str,
     portfolio_update: PortfolioUpdate,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Update portfolio details.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
         # Update trading capital if provided
         if portfolio_update.trading_capital is not None:
-            success = portfolio_manager.update_trading_capital(
+            success = await run_in_threadpool(
+                db.update_trading_capital,
                 portfolio_name,
-                portfolio_update.trading_capital
+                portfolio_update.trading_capital,
+                current_user.id,
             )
             if not success:
                 raise HTTPException(
@@ -274,8 +300,17 @@ async def update_portfolio(
                 )
         
         # Get updated portfolio
-        updated_portfolio = portfolio_manager.get_portfolio(portfolio_name)
-        value_info = portfolio_manager.get_portfolio_value(portfolio_name)
+        updated_portfolio = await run_in_threadpool(
+            db.get_portfolio,
+            portfolio_name,
+            current_user.id,
+        )
+        value_info = await run_in_threadpool(
+            db.get_portfolio_value,
+            portfolio_name,
+            None,
+            current_user.id,
+        )
         
         return {
             **updated_portfolio,
@@ -297,34 +332,55 @@ async def update_portfolio(
 @router.delete("/{portfolio_name}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_portfolio(
     portfolio_name: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Delete a portfolio.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
-    
-    # In production, implement soft delete or archive
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Portfolio deletion not implemented for safety. Archive feature coming soon."
-    )
+    await get_user_portfolio(portfolio_name, current_user, db)
+
+    try:
+        deleted = await run_in_threadpool(
+            db.delete_portfolio,
+            portfolio_name,
+            current_user.id,
+        )
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Portfolio '{portfolio_name}' not found"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting portfolio: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete portfolio"
+        )
 
 
 # Holdings endpoints
 @router.get("/{portfolio_name}/holdings", response_model=List[HoldingResponse])
 async def get_holdings(
     portfolio_name: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Get all holdings for a portfolio.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
-        holdings = portfolio_manager.get_holdings(portfolio_name)
-        value_info = portfolio_manager.get_portfolio_value(portfolio_name)
+        holdings = await run_in_threadpool(db.get_holdings, portfolio_name, current_user.id)
+        value_info = await run_in_threadpool(
+            db.get_portfolio_value,
+            portfolio_name,
+            None,
+            current_user.id,
+        )
         
         # Enrich holdings with current market data
         enriched_holdings = []
@@ -359,24 +415,27 @@ async def get_holdings(
 async def add_or_update_holding(
     portfolio_name: str,
     holding_data: HoldingCreate,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Add or update a holding in the portfolio.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
         # Update holding
-        portfolio_manager.update_holding(
+        await run_in_threadpool(
+            db.update_holding,
             portfolio_name,
             holding_data.symbol,
             holding_data.quantity,
-            holding_data.avg_cost
+            holding_data.avg_cost,
+            current_user.id,
         )
         
         # Get updated holding info
-        holdings = portfolio_manager.get_holdings(portfolio_name)
+        holdings = await run_in_threadpool(db.get_holdings, portfolio_name, current_user.id)
         holding = next((h for h in holdings if h['symbol'] == holding_data.symbol), None)
         
         if not holding:
@@ -386,7 +445,12 @@ async def add_or_update_holding(
             )
         
         # Get current market data
-        value_info = portfolio_manager.get_portfolio_value(portfolio_name)
+        value_info = await run_in_threadpool(
+            db.get_portfolio_value,
+            portfolio_name,
+            None,
+            current_user.id,
+        )
         holding_detail = next(
             (h for h in value_info['holdings_details'] if h['symbol'] == holding_data.symbol),
             None
@@ -415,16 +479,24 @@ async def add_or_update_holding(
 async def remove_holding(
     portfolio_name: str,
     symbol: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Remove a holding from the portfolio.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
         # Remove holding by setting quantity to 0
-        portfolio_manager.update_holding(portfolio_name, symbol.upper(), 0)
+        await run_in_threadpool(
+            db.update_holding,
+            portfolio_name,
+            symbol.upper(),
+            0,
+            None,
+            current_user.id,
+        )
     except Exception as e:
         logger.error(f"Error removing holding: {e}")
         raise HTTPException(
@@ -439,15 +511,21 @@ async def get_trades(
     portfolio_name: str,
     days: int = Query(30, ge=1, le=365, description="Number of days of history"),
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Get trade history for a portfolio.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
-        trades = portfolio_manager.get_trade_history(portfolio_name, days)
+        trades = await run_in_threadpool(
+            db.get_trade_history,
+            portfolio_name,
+            days,
+            current_user.id,
+        )
         
         # Filter by symbol if provided
         if symbol:
@@ -466,16 +544,18 @@ async def get_trades(
 async def record_trade(
     portfolio_name: str,
     trade_data: TradeCreate,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Record a new trade.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
         # Record trade
-        trade_id = portfolio_manager.record_trade(
+        trade_id = await run_in_threadpool(
+            db.record_trade,
             name=portfolio_name,
             symbol=trade_data.symbol,
             action=trade_data.action,
@@ -483,11 +563,17 @@ async def record_trade(
             price=trade_data.price,
             strategy=trade_data.strategy,
             confidence=trade_data.confidence,
-            notes=trade_data.notes
+            notes=trade_data.notes,
+            user_id=current_user.id,
         )
         
         # Get the recorded trade
-        trades = portfolio_manager.get_trade_history(portfolio_name, 1)
+        trades = await run_in_threadpool(
+            db.get_trade_history,
+            portfolio_name,
+            1,
+            current_user.id,
+        )
         if not trades:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -508,35 +594,36 @@ async def record_trade(
         )
 
 
-# Performance endpoints
-@router.get("/{portfolio_name}/performance", response_model=PerformanceMetrics)
+# Portfolio summary endpoint
+@router.get("/{portfolio_name}/performance", response_model=PortfolioSummaryMetrics)
 async def get_performance(
     portfolio_name: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
-    Get portfolio performance metrics.
+    Get stock portfolio summary metrics.
     """
-    portfolio = await get_user_portfolio(portfolio_name, current_user)
+    await get_user_portfolio(portfolio_name, current_user, db)
     
     try:
-        metrics = portfolio_manager.get_performance_metrics(portfolio_name)
+        metrics = await run_in_threadpool(
+            db.get_performance_metrics,
+            portfolio_name,
+            current_user.id,
+        )
         
         if not metrics:
             # Return default metrics if none available
-            return PerformanceMetrics(
+            return PortfolioSummaryMetrics(
                 total_return=0,
                 total_return_pct=0,
                 realized_pnl=0,
                 unrealized_pnl=0,
-                win_rate=0,
                 total_trades=0,
-                winning_trades=0,
-                losing_trades=0,
-                avg_win=0,
-                avg_loss=0,
-                sharpe_ratio=None,
-                max_drawdown=None
+                buy_trades=0,
+                sell_trades=0,
+                total_fees=0,
             )
         
         return metrics

@@ -5,10 +5,10 @@ Handles all portfolio operations including holdings, trades, and performance tra
 """
 
 import sqlite3
-import json
 import logging
+import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from contextlib import contextmanager
 import os
 
@@ -57,13 +57,29 @@ class PortfolioManager:
     def init_database(self):
         """Initialize database schema from the roadmap specification."""
         schema_sql = """
+        -- Users for authentication
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            hashed_password TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT 1,
+            is_admin BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_login TIMESTAMP,
+            CONSTRAINT username_length CHECK (length(username) >= 3 AND length(username) <= 50),
+            CONSTRAINT email_format CHECK (email LIKE '%_@__%.__%')
+        );
+
         -- User portfolios
         CREATE TABLE IF NOT EXISTS portfolios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             name TEXT UNIQUE NOT NULL,
             trading_capital REAL NOT NULL DEFAULT 5000.0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         );
 
         -- Current holdings
@@ -160,7 +176,33 @@ class PortfolioManager:
             UNIQUE(portfolio_id, symbol)
         );
         
+        -- JWT token blacklist for logout functionality
+        CREATE TABLE IF NOT EXISTS token_blacklist (
+            jti TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            blacklisted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Portfolio analysis jobs
+        CREATE TABLE IF NOT EXISTS analysis_jobs (
+            job_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            portfolio_name TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed')),
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            result_json TEXT,
+            error TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
         -- Create indexes for better performance
+        CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+        CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+        CREATE INDEX IF NOT EXISTS idx_token_blacklist_expires ON token_blacklist(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_analysis_jobs_user ON analysis_jobs(user_id);
+        CREATE INDEX IF NOT EXISTS idx_analysis_jobs_status ON analysis_jobs(status);
         CREATE INDEX IF NOT EXISTS idx_holdings_portfolio ON holdings(portfolio_id);
         CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio_id);
         CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
@@ -178,9 +220,94 @@ class PortfolioManager:
         
         with self._get_connection() as conn:
             conn.executescript(schema_sql)
+            self._migrate_portfolio_ownership_schema(conn)
             logger.info("Database schema initialized successfully")
-    
-    def create_portfolio(self, name: str, trading_capital: float = 5000.0) -> Dict[str, Any]:
+
+    def _migrate_portfolio_ownership_schema(self, conn: sqlite3.Connection) -> None:
+        """Migrate portfolios to user-owned rows with per-user names."""
+        columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(portfolios)").fetchall()
+        }
+        needs_rebuild = "user_id" not in columns
+
+        if not needs_rebuild:
+            indexes = conn.execute("PRAGMA index_list(portfolios)").fetchall()
+            for index in indexes:
+                if not index["unique"]:
+                    continue
+                index_columns = [
+                    row["name"]
+                    for row in conn.execute(f"PRAGMA index_info({index['name']})").fetchall()
+                ]
+                if index_columns == ["name"]:
+                    needs_rebuild = True
+                    break
+
+        if not needs_rebuild:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_portfolios_user ON portfolios(user_id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolios_user_name "
+                "ON portfolios(user_id, name)"
+            )
+            return
+
+        logger.info("Migrating portfolios table to user-owned schema")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            """
+            CREATE TABLE portfolios_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                trading_capital REAL NOT NULL DEFAULT 5000.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, name)
+            )
+            """
+        )
+
+        select_user_id = "user_id" if "user_id" in columns else "NULL AS user_id"
+        conn.execute(
+            f"""
+            INSERT INTO portfolios_new (id, user_id, name, trading_capital, created_at, updated_at)
+            SELECT id, {select_user_id}, name, trading_capital, created_at, updated_at
+            FROM portfolios
+            """
+        )
+        conn.execute("DROP TABLE portfolios")
+        conn.execute("ALTER TABLE portfolios_new RENAME TO portfolios")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_portfolios_user ON portfolios(user_id)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolios_user_name "
+            "ON portfolios(user_id, name)"
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS update_portfolio_timestamp
+            AFTER UPDATE ON portfolios
+            BEGIN
+                UPDATE portfolios SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+            """
+        )
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    def claim_unowned_portfolios(self, user_id: int) -> int:
+        """Assign legacy unowned portfolios to a user."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE portfolios SET user_id = ? WHERE user_id IS NULL",
+                (user_id,),
+            )
+            return cursor.rowcount
+
+    def create_portfolio(self, name: str, trading_capital: float = 5000.0,
+                         user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Create a new portfolio.
         
@@ -194,7 +321,7 @@ class PortfolioManager:
         Raises:
             ValueError: If portfolio name already exists
         """
-        if not name or not isinstance(name, str):
+        if not name:
             raise ValueError("Portfolio name must be a non-empty string")
         
         if trading_capital <= 0:
@@ -203,14 +330,15 @@ class PortfolioManager:
         try:
             with self._get_connection() as conn:
                 cursor = conn.execute(
-                    "INSERT INTO portfolios (name, trading_capital) VALUES (?, ?)",
-                    (name.strip(), trading_capital)
+                    "INSERT INTO portfolios (user_id, name, trading_capital) VALUES (?, ?, ?)",
+                    (user_id, name.strip(), trading_capital)
                 )
                 portfolio_id = cursor.lastrowid
                 
                 # Return the created portfolio
                 return {
                     'id': portfolio_id,
+                    'user_id': user_id,
                     'name': name.strip(),
                     'trading_capital': trading_capital,
                     'created_at': datetime.now().isoformat(),
@@ -219,7 +347,8 @@ class PortfolioManager:
         except sqlite3.IntegrityError:
             raise ValueError(f"Portfolio '{name}' already exists")
     
-    def get_portfolio(self, name: str = "default") -> Optional[Dict[str, Any]]:
+    def get_portfolio(self, name: str = "default",
+                      user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Get portfolio details by name.
         
@@ -230,10 +359,16 @@ class PortfolioManager:
             Dictionary with portfolio details or None if not found
         """
         with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM portfolios WHERE name = ?",
-                (name,)
-            ).fetchone()
+            if user_id is None:
+                row = conn.execute(
+                    "SELECT * FROM portfolios WHERE name = ?",
+                    (name,)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM portfolios WHERE name = ? AND user_id = ?",
+                    (name, user_id)
+                ).fetchone()
             
             if row:
                 return dict(row)
@@ -251,16 +386,23 @@ class PortfolioManager:
                 return dict(row)
             return None
     
-    def list_portfolios(self) -> List[Dict[str, Any]]:
+    def list_portfolios(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """List all portfolios."""
         with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM portfolios ORDER BY created_at DESC"
-            ).fetchall()
+            if user_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM portfolios ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM portfolios WHERE user_id = ? ORDER BY created_at DESC",
+                    (user_id,),
+                ).fetchall()
             
             return [dict(row) for row in rows]
     
-    def update_trading_capital(self, name: str, capital: float) -> bool:
+    def update_trading_capital(self, name: str, capital: float,
+                               user_id: Optional[int] = None) -> bool:
         """
         Update available trading capital for a portfolio.
         
@@ -275,13 +417,51 @@ class PortfolioManager:
             raise ValueError("Trading capital cannot be negative")
         
         with self._get_connection() as conn:
+            if user_id is None:
+                cursor = conn.execute(
+                    "UPDATE portfolios SET trading_capital = ? WHERE name = ?",
+                    (capital, name)
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE portfolios SET trading_capital = ? WHERE name = ? AND user_id = ?",
+                    (capital, name, user_id)
+                )
+            return cursor.rowcount > 0
+
+    def delete_portfolio(self, name: str, user_id: Optional[int] = None) -> bool:
+        """
+        Delete a portfolio and all dependent local records.
+
+        This is intentionally explicit instead of relying on SQLite cascades,
+        because the existing schema does not define ON DELETE CASCADE.
+        """
+        portfolio = self.get_portfolio(name, user_id=user_id)
+        if not portfolio:
+            return False
+
+        dependent_tables = [
+            "holdings",
+            "trades",
+            "portfolio_snapshots",
+            "price_alerts",
+            "pending_orders",
+            "chat_sessions",
+            "watchlists",
+        ]
+
+        with self._get_connection() as conn:
+            for table in dependent_tables:
+                conn.execute(f"DELETE FROM {table} WHERE portfolio_id = ?", (portfolio["id"],))
+
             cursor = conn.execute(
-                "UPDATE portfolios SET trading_capital = ? WHERE name = ?",
-                (capital, name)
+                "DELETE FROM portfolios WHERE id = ?",
+                (portfolio["id"],),
             )
             return cursor.rowcount > 0
     
-    def get_holdings(self, name: str = "default") -> List[Dict[str, Any]]:
+    def get_holdings(self, name: str = "default",
+                     user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Get current holdings for a portfolio.
         
@@ -291,7 +471,7 @@ class PortfolioManager:
         Returns:
             List of holdings with symbol, quantity, avg_cost
         """
-        portfolio = self.get_portfolio(name)
+        portfolio = self.get_portfolio(name, user_id=user_id)
         if not portfolio:
             return []
         
@@ -308,7 +488,9 @@ class PortfolioManager:
             
             return [dict(row) for row in rows]
     
-    def update_holding(self, name: str, symbol: str, quantity: int, avg_cost: Optional[float] = None) -> bool:
+    def update_holding(self, name: str, symbol: str, quantity: int,
+                       avg_cost: Optional[float] = None,
+                       user_id: Optional[int] = None) -> bool:
         """
         Update or add a holding in a portfolio.
         
@@ -321,7 +503,7 @@ class PortfolioManager:
         Returns:
             True if successful
         """
-        portfolio = self.get_portfolio(name)
+        portfolio = self.get_portfolio(name, user_id=user_id)
         if not portfolio:
             raise ValueError(f"Portfolio '{name}' not found")
         
@@ -362,7 +544,8 @@ class PortfolioManager:
     
     def record_trade(self, name: str, symbol: str, action: str, quantity: int, 
                     price: float, strategy: Optional[str] = None, 
-                    confidence: Optional[float] = None, notes: Optional[str] = None) -> int:
+                    confidence: Optional[float] = None, notes: Optional[str] = None,
+                    user_id: Optional[int] = None) -> int:
         """
         Record a trade execution.
         
@@ -379,7 +562,7 @@ class PortfolioManager:
         Returns:
             Trade ID
         """
-        portfolio = self.get_portfolio(name)
+        portfolio = self.get_portfolio(name, user_id=user_id)
         if not portfolio:
             raise ValueError(f"Portfolio '{name}' not found")
         
@@ -414,6 +597,8 @@ class PortfolioManager:
             )
             
             trade_id = cursor.lastrowid
+            if trade_id is None:
+                raise RuntimeError("Failed to insert trade: no row ID returned")
             
             # Update holdings based on the trade
             self._update_holdings_from_trade(conn, portfolio['id'], symbol, action, quantity, price)
@@ -473,7 +658,9 @@ class PortfolioManager:
             else:
                 raise ValueError(f"Insufficient shares to sell. Current: {current['quantity'] if current else 0}, Requested: {quantity}")
     
-    def get_portfolio_value(self, name: str = "default", current_prices: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    def get_portfolio_value(self, name: str = "default",
+                            current_prices: Optional[Dict[str, float]] = None,
+                            user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Calculate current portfolio value.
         
@@ -484,7 +671,7 @@ class PortfolioManager:
         Returns:
             Dictionary with total_value, holdings_value, cash_available, holdings_details
         """
-        portfolio = self.get_portfolio(name)
+        portfolio = self.get_portfolio(name, user_id=user_id)
         if not portfolio:
             return {
                 'total_value': 0,
@@ -493,9 +680,9 @@ class PortfolioManager:
                 'holdings_details': []
             }
         
-        holdings = self.get_holdings(name)
+        holdings = self.get_holdings(name, user_id=user_id)
         holdings_value = 0
-        holdings_details = []
+        holdings_details: List[Dict[str, Any]] = []
         
         for holding in holdings:
             symbol = holding['symbol']
@@ -543,7 +730,8 @@ class PortfolioManager:
             'holdings_details': holdings_details
         }
     
-    def get_trade_history(self, name: str = "default", days: int = 30) -> List[Dict[str, Any]]:
+    def get_trade_history(self, name: str = "default", days: int = 30,
+                          user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Get recent trade history for a portfolio.
         
@@ -554,7 +742,7 @@ class PortfolioManager:
         Returns:
             List of trades ordered by timestamp descending
         """
-        portfolio = self.get_portfolio(name)
+        portfolio = self.get_portfolio(name, user_id=user_id)
         if not portfolio:
             return []
         
@@ -572,7 +760,8 @@ class PortfolioManager:
             
             return [dict(row) for row in rows]
     
-    def get_performance_metrics(self, name: str = "default") -> Dict[str, Any]:
+    def get_performance_metrics(self, name: str = "default",
+                                user_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Calculate portfolio performance metrics.
         
@@ -582,7 +771,7 @@ class PortfolioManager:
         Returns:
             Dictionary with performance metrics
         """
-        portfolio = self.get_portfolio(name)
+        portfolio = self.get_portfolio(name, user_id=user_id)
         if not portfolio:
             return {}
         
@@ -607,39 +796,13 @@ class PortfolioManager:
             realized_pnl = self._calculate_realized_pnl(conn, portfolio['id'])
             
             # Get current portfolio value
-            portfolio_value = self.get_portfolio_value(name)
+            portfolio_value = self.get_portfolio_value(name, user_id=user_id)
             
             # Calculate returns
             initial_capital = portfolio['trading_capital']
             current_value = portfolio_value['total_value']
             total_return = current_value - initial_capital
             total_return_pct = (total_return / initial_capital * 100) if initial_capital > 0 else 0
-            
-            # Calculate win rate from realized trades
-            win_stats = conn.execute(
-                """
-                SELECT 
-                    COUNT(*) as total_closed,
-                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-                    AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_win,
-                    AVG(CASE WHEN pnl < 0 THEN pnl ELSE NULL END) as avg_loss
-                FROM (
-                    SELECT symbol, SUM(
-                        CASE 
-                            WHEN action = 'SELL' THEN (quantity * price) - fees
-                            WHEN action = 'BUY' THEN -(quantity * price) - fees
-                        END
-                    ) as pnl
-                    FROM trades
-                    WHERE portfolio_id = ?
-                    GROUP BY symbol
-                    HAVING SUM(CASE WHEN action = 'BUY' THEN quantity ELSE -quantity END) = 0
-                )
-                """,
-                (portfolio['id'],)
-            ).fetchone()
-            
-            win_rate = (win_stats['winning_trades'] / win_stats['total_closed'] * 100) if win_stats['total_closed'] > 0 else 0
             
             return {
                 'total_trades': trade_stats['total_trades'] or 0,
@@ -650,9 +813,6 @@ class PortfolioManager:
                 'unrealized_pnl': round(sum(h['unrealized_pnl'] for h in portfolio_value['holdings_details']), 2),
                 'total_return': round(total_return, 2),
                 'total_return_pct': round(total_return_pct, 2),
-                'win_rate': round(win_rate, 2),
-                'avg_win': round(win_stats['avg_win'] or 0, 2),
-                'avg_loss': round(win_stats['avg_loss'] or 0, 2),
                 'first_trade': trade_stats['first_trade'],
                 'last_trade': trade_stats['last_trade']
             }
@@ -699,7 +859,10 @@ class PortfolioManager:
                 """,
                 (portfolio['id'], symbol.upper(), alert_type, target_price)
             )
-            return cursor.lastrowid
+            alert_id = cursor.lastrowid
+            if alert_id is None:
+                raise RuntimeError("Failed to insert price alert: no row ID returned")
+            return alert_id
     
     def get_active_alerts(self, name: str = "default") -> List[Dict[str, Any]]:
         """Get active price alerts for a portfolio."""
@@ -811,6 +974,281 @@ class PortfolioManager:
         except Exception as e:
             logger.error(f"Restore failed: {e}")
             raise
+
+    # ==========================================
+    # User Management Methods
+    # ==========================================
+
+    def create_user(self, username: str, email: str, hashed_password: str,
+                    is_admin: bool = False) -> Dict[str, Any]:
+        """
+        Create a new user.
+
+        Args:
+            username: Unique username (3-50 characters)
+            email: Valid email address
+            hashed_password: Bcrypt hashed password
+            is_admin: Whether user has admin privileges
+
+        Returns:
+            Dictionary with user details
+
+        Raises:
+            ValueError: If username or email already exists
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO users (username, email, hashed_password, is_admin)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (username, email, hashed_password, int(is_admin))
+                )
+                user_id = cursor.lastrowid
+
+                # Fetch and return the created user
+                row = conn.execute(
+                    "SELECT * FROM users WHERE id = ?", (user_id,)
+                ).fetchone()
+
+                logger.info(f"Created user: {username} (ID: {user_id})")
+                return dict(row)
+
+        except sqlite3.IntegrityError as e:
+            if "username" in str(e).lower():
+                raise ValueError(f"Username '{username}' already exists")
+            elif "email" in str(e).lower():
+                raise ValueError(f"Email '{email}' already registered")
+            else:
+                raise ValueError(f"User creation failed: {e}")
+
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """Get user by username."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+
+            return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get user by ID."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+
+            return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Get user by email."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email = ?", (email,)
+            ).fetchone()
+
+            return dict(row) if row else None
+
+    def update_last_login(self, username: str) -> bool:
+        """Update user's last login timestamp."""
+        try:
+            with self._get_connection() as conn:
+                from datetime import datetime, timezone
+                conn.execute(
+                    "UPDATE users SET last_login = ? WHERE username = ?",
+                    (datetime.now(timezone.utc).isoformat(), username)
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update last login for {username}: {e}")
+            return False
+
+    def deactivate_user(self, username: str) -> bool:
+        """Deactivate a user account."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE users SET is_active = 0 WHERE username = ?",
+                    (username,)
+                )
+                logger.info(f"Deactivated user: {username}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to deactivate user {username}: {e}")
+            return False
+
+    def list_users(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """List all users."""
+        with self._get_connection() as conn:
+            if active_only:
+                rows = conn.execute(
+                    "SELECT id, username, email, is_admin, created_at, last_login FROM users WHERE is_active = 1"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, username, email, is_admin, is_active, created_at, last_login FROM users"
+                ).fetchall()
+
+            return [dict(row) for row in rows]
+
+    # ==========================================
+    # Analysis Job Methods
+    # ==========================================
+
+    def create_analysis_job(
+        self,
+        job_id: str,
+        user_id: int,
+        portfolio_name: str,
+        status: str = "pending",
+    ) -> Dict[str, Any]:
+        """Create a portfolio analysis job."""
+        if status not in {"pending", "running", "completed", "failed"}:
+            raise ValueError(f"Invalid analysis job status: {status}")
+
+        created_at = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO analysis_jobs (job_id, user_id, portfolio_name, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, user_id, portfolio_name, status, created_at),
+            )
+
+        return {
+            "job_id": job_id,
+            "user_id": user_id,
+            "portfolio_name": portfolio_name,
+            "status": status,
+            "created_at": created_at,
+            "completed_at": None,
+            "result": None,
+            "error": None,
+        }
+
+    def get_analysis_job(self, job_id: str, user_id: int) -> Optional[Dict[str, Any]]:
+        """Get a user's analysis job by ID."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM analysis_jobs
+                WHERE job_id = ? AND user_id = ?
+                """,
+                (job_id, user_id),
+            ).fetchone()
+
+        return self._analysis_job_from_row(row) if row else None
+
+    def update_analysis_job(
+        self,
+        job_id: str,
+        user_id: int,
+        *,
+        status: Optional[str] = None,
+        result: Optional[Any] = None,
+        error: Optional[str] = None,
+        completed_at: Optional[datetime] = None,
+    ) -> bool:
+        """Update a user's analysis job."""
+        if status is not None and status not in {"pending", "running", "completed", "failed"}:
+            raise ValueError(f"Invalid analysis job status: {status}")
+
+        updates = []
+        values: List[Any] = []
+        if status is not None:
+            updates.append("status = ?")
+            values.append(status)
+        if result is not None:
+            updates.append("result_json = ?")
+            values.append(json.dumps(result, default=str))
+        if error is not None:
+            updates.append("error = ?")
+            values.append(error)
+        if completed_at is not None:
+            updates.append("completed_at = ?")
+            values.append(completed_at.isoformat())
+
+        if not updates:
+            return False
+
+        values.extend([job_id, user_id])
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE analysis_jobs
+                SET {", ".join(updates)}
+                WHERE job_id = ? AND user_id = ?
+                """,
+                values,
+            )
+            return cursor.rowcount > 0
+
+    def delete_analysis_job(self, job_id: str, user_id: int) -> bool:
+        """Delete a user's analysis job."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM analysis_jobs WHERE job_id = ? AND user_id = ?",
+                (job_id, user_id),
+            )
+            return cursor.rowcount > 0
+
+    def _analysis_job_from_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """Convert an analysis_jobs row into API-friendly data."""
+        result_json = row["result_json"]
+        return {
+            "job_id": row["job_id"],
+            "user_id": row["user_id"],
+            "portfolio_name": row["portfolio_name"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "completed_at": row["completed_at"],
+            "result": json.loads(result_json) if result_json else None,
+            "error": row["error"],
+        }
+
+    # ==========================================
+    # JWT Token Blacklist Methods
+    # ==========================================
+
+    def blacklist_token(self, jti: str, username: str, expires_at: datetime) -> bool:
+        """Add a JWT token to the blacklist."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO token_blacklist (jti, username, expires_at) VALUES (?, ?, ?)",
+                    (jti, username, expires_at.isoformat())
+                )
+                logger.info(f"Blacklisted token {jti} for user {username}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to blacklist token: {e}")
+            return False
+
+    def is_token_blacklisted(self, jti: str) -> bool:
+        """Check if a token is blacklisted."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM token_blacklist WHERE jti = ?", (jti,)
+            ).fetchone()
+            return row is not None
+
+    def cleanup_expired_tokens(self) -> int:
+        """Remove expired tokens from blacklist."""
+        try:
+            from datetime import datetime, timezone
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM token_blacklist WHERE expires_at < ?",
+                    (datetime.now(timezone.utc).isoformat(),)
+                )
+                count = cursor.rowcount
+                logger.info(f"Cleaned up {count} expired tokens")
+                return count
+        except Exception as e:
+            logger.error(f"Failed to cleanup expired tokens: {e}")
+            return 0
 
 
 # Example usage and testing

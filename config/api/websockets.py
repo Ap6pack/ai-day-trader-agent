@@ -5,17 +5,19 @@ Provides real-time portfolio updates, trade notifications, and analysis results.
 """
 
 from typing import Dict, Set, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import asyncio
 import logging
 
 from fastapi import WebSocket, WebSocketDisconnect, Depends, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.websockets import WebSocketState
 import jwt
 from jwt.exceptions import PyJWTError
 
 from config.api.auth import JWT_SECRET_KEY, JWT_ALGORITHM, get_user
+from config.api.dependencies import get_portfolio_manager
 
 # Logging
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ class ConnectionManager:
                 "type": "connection",
                 "status": "connected",
                 "message": "Welcome to AI Day Trader real-time updates",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             },
             websocket
         )
@@ -97,7 +99,7 @@ class ConnectionManager:
                 "type": "portfolio_update",
                 "portfolio_name": portfolio_name,
                 "data": update,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
             # Send to all subscribed users
@@ -111,7 +113,7 @@ class ConnectionManager:
                 "type": "trade_notification",
                 "portfolio_name": portfolio_name,
                 "trade": trade,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
             
             for user_id in self.portfolio_subscriptions[portfolio_name]:
@@ -122,7 +124,7 @@ class ConnectionManager:
         message = {
             "type": "analysis_update",
             "data": analysis,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         await self.send_user_message(message, user_id)
     
@@ -156,13 +158,20 @@ async def get_current_user_ws(websocket: WebSocket, token: Optional[str] = None)
         # Decode JWT token
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        jti: str = payload.get("jti")
         
-        if username is None:
+        if username is None or token_type != "access":
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return None
-            
+
+        db = get_portfolio_manager()
+        if jti and await run_in_threadpool(db.is_token_blacklisted, jti):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return None
+
         # Verify user exists
-        user = get_user(username)
+        user = await run_in_threadpool(get_user, username, db)
         if not user:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return None
@@ -205,7 +214,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         {
                             "type": "subscription_confirmed",
                             "portfolio_name": portfolio_name,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         },
                         websocket
                     )
@@ -218,7 +227,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         {
                             "type": "unsubscription_confirmed",
                             "portfolio_name": portfolio_name,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         },
                         websocket
                     )
@@ -228,7 +237,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await manager.send_personal_message(
                     {
                         "type": "pong",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     },
                     websocket
                 )
@@ -239,7 +248,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     {
                         "type": "error",
                         "message": f"Unknown message type: {message_type}",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     },
                     websocket
                 )

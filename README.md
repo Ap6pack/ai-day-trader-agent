@@ -59,12 +59,24 @@ pip install -r requirements.txt
 Create a `.env` file in the project root with the following keys:
 
 ```
-# Required API Keys
+# Primary API Keys
+ALPACA_API_KEY=your_alpaca_key
+ALPACA_SECRET_KEY=your_alpaca_secret
+ALPACA_TRADING_BASE_URL=https://paper-api.alpaca.markets/v2
+OPENAI_API_KEY=your_openai_key
+
+# Optional notifications
 DISCORD_BOT_TOKEN=your_discord_bot_token
+DISCORD_GUILD_ID=your_discord_guild_id
+DISCORD_CHANNEL_ID=your_discord_channel_id
+
+# Optional market/news fallbacks
+MARKET_DATA_PROVIDERS=alpaca,yahoo_finance
+ALPACA_DATA_FEED=iex
+ALPACA_DATA_BASE_URL=https://data.alpaca.markets
 TWELVE_DATA_API_KEY=your_12data_api_key
 ALPHA_VANTAGE_API_KEY=your_alphavantage_api_key
 NEWS_API_KEY=your_newsapi_key
-OPENAI_API_KEY=your_openai_key
 
 # Optional Trading Configuration
 TRADING_CAPITAL=5000.0                    # Your trading capital in dollars
@@ -75,6 +87,10 @@ MAX_POSITION_PERCENTAGE=0.10              # Maximum 10% of capital per trade
 TWELVE_DATA_PREMIUM=auto                  # auto (detect), true (premium), false (free)
 
 # API Rate Limiting Configuration
+ALPACA_RATE_LIMIT_WAIT=60                # Seconds to wait when rate limited
+ALPACA_MAX_RETRIES=3                     # Max retry attempts
+ALPACA_CALLS_PER_MINUTE=180              # Conservative default below Alpaca Basic historical limit
+
 TWELVE_DATA_RATE_LIMIT_WAIT=60           # Seconds to wait when rate limited
 TWELVE_DATA_MAX_RETRIES=3                # Max retry attempts
 TWELVE_DATA_CALLS_PER_MINUTE=8           # Your plan's limit
@@ -172,8 +188,11 @@ python run.py AAPL
 # Analyze with specific portfolio
 python run.py AAPL --portfolio my_portfolio
 
-# Override capital/holdings for single analysis
-python run.py AAPL --capital 10000 --holdings 50
+# Submit an actionable recommendation to Alpaca paper trading
+python run.py AAPL --portfolio my_portfolio --paper-trade
+
+# Record an actionable recommendation locally without submitting an Alpaca order
+python run.py AAPL --portfolio my_portfolio --record-paper-trade
 ```
 
 ### Discord Bot

@@ -5,12 +5,13 @@ Provides secure REST endpoints for running trading analysis on symbols and portf
 """
 
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from pydantic import BaseModel, Field, validator
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import sys
 import os
 
@@ -21,6 +22,7 @@ from core.pipeline import EnhancedTradingPipeline
 from core.portfolio_manager import PortfolioManager
 from config.env_loader import load_env_variables
 from config.api.auth import get_current_active_user, User
+from config.api.dependencies import get_portfolio_manager
 from utils.formatter import format_analysis_result
 
 # Logging
@@ -29,53 +31,52 @@ logger = logging.getLogger(__name__)
 # Router
 router = APIRouter()
 
-# Initialize components
-portfolio_manager = PortfolioManager()
-api_keys = load_env_variables()
-
-
 # Pydantic models for request/response validation
 class AnalysisRequest(BaseModel):
     """Model for analysis request"""
-    symbol: str = Field(..., min_length=1, max_length=10, regex="^[A-Z]+$", description="Stock symbol to analyze")
+    symbol: str = Field(..., min_length=1, max_length=10, pattern="^[A-Z]+$", description="Stock symbol to analyze")
     portfolio_name: Optional[str] = Field("default", description="Portfolio context for analysis")
     override_capital: Optional[float] = Field(None, gt=0, description="Override trading capital")
     override_holdings: Optional[int] = Field(None, ge=0, description="Override current holdings")
     
-    @validator('symbol')
-    def uppercase_symbol(cls, v):
+    @field_validator('symbol', mode='before')
+    @classmethod
+    def uppercase_symbol(cls, v: str) -> str:
         return v.upper()
 
 
 class BatchAnalysisRequest(BaseModel):
     """Model for batch analysis request"""
-    symbols: List[str] = Field(..., min_items=1, max_items=50, description="List of symbols to analyze")
+    symbols: List[str] = Field(..., min_length=1, max_length=50, description="List of symbols to analyze")
     portfolio_name: Optional[str] = Field("default", description="Portfolio context for analysis")
     
-    @validator('symbols')
-    def uppercase_symbols(cls, v):
+    @field_validator('symbols', mode='before')
+    @classmethod
+    def uppercase_symbols(cls, v: List[str]) -> List[str]:
         return [s.upper() for s in v]
 
 
 class TechnicalIndicators(BaseModel):
     """Technical indicators model"""
     current_price: float
-    rsi: Optional[float]
-    macd: Optional[float]
-    macd_signal: Optional[float]
-    sma_20: Optional[float]
-    ema_20: Optional[float]
-    volume: Optional[int]
-    price_change_pct: Optional[float]
+    rsi: Optional[float] = None
+    macd: Optional[float] = None
+    macd_signal: Optional[float] = None
+    sma_20: Optional[float] = None
+    ema_20: Optional[float] = None
+    volume: Optional[int] = None
+    price_change_pct: Optional[float] = None
 
 
 class SignalDetails(BaseModel):
     """Signal details model"""
-    signal: str = Field(..., regex="^(BUY|SELL|HOLD)$")
-    strength: float = Field(..., ge=0, le=1)
+    model_config = ConfigDict(extra="allow")
+
+    signal: str = Field(..., pattern="^(BUY|SELL|HOLD)$")
+    strength: float = Field(0, ge=0, le=1)
     priority: int
     reason: str
-    indicators: Optional[Dict[str, Any]]
+    indicators: Optional[Dict[str, Any]] = None
 
 
 class RiskParameters(BaseModel):
@@ -92,16 +93,16 @@ class AnalysisResponse(BaseModel):
     """Analysis response model"""
     symbol: str
     timestamp: datetime
-    recommendation: str = Field(..., regex="^(BUY|SELL|HOLD)$")
+    recommendation: str = Field(..., pattern="^(BUY|SELL|HOLD)$")
     quantity: int = Field(..., ge=0)
     confidence: float = Field(..., ge=0, le=1)
     primary_strategy: str
     primary_reason: str
     confirming_strategies: int
     conflicting_strategies: int
-    technical_indicators: Optional[TechnicalIndicators]
+    technical_indicators: Optional[TechnicalIndicators] = None
     all_signals: Dict[str, SignalDetails]
-    risk_parameters: Optional[RiskParameters]
+    risk_parameters: Optional[RiskParameters] = None
     portfolio_context: Dict[str, Any]
     formatted_output: str
 
@@ -124,27 +125,56 @@ class PortfolioAnalysisResponse(BaseModel):
 class AnalysisStatus(BaseModel):
     """Analysis job status model"""
     job_id: str
-    status: str = Field(..., regex="^(pending|running|completed|failed)$")
+    status: str = Field(..., pattern="^(pending|running|completed|failed)$")
     created_at: datetime
     completed_at: Optional[datetime]
     result: Optional[Any]
     error: Optional[str]
 
 
-# In-memory job storage (use Redis or database in production)
-analysis_jobs: Dict[str, AnalysisStatus] = {}
+def _normalize_signal_details(signal: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize strategy-specific signals for the public API contract."""
+    normalized = dict(signal or {})
+
+    if "strength" not in normalized:
+        normalized["strength"] = normalized.get("confidence", 0)
+    if "indicators" not in normalized:
+        normalized["indicators"] = None
+
+    try:
+        normalized["strength"] = max(0.0, min(1.0, float(normalized["strength"] or 0)))
+    except (TypeError, ValueError):
+        normalized["strength"] = 0.0
+
+    normalized["priority"] = int(normalized.get("priority") or 0)
+    normalized["reason"] = str(normalized.get("reason") or "No strategy reason provided")
+    normalized["signal"] = str(normalized.get("signal") or "HOLD").upper()
+    if normalized["signal"] not in {"BUY", "SELL", "HOLD"}:
+        normalized["signal"] = "HOLD"
+
+    return normalized
+
+
+def _normalize_all_signals(all_signals: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Normalize all strategy signals while preserving strategy-specific fields."""
+    return {
+        name: _normalize_signal_details(signal)
+        for name, signal in (all_signals or {}).items()
+    }
 
 
 async def run_symbol_analysis(
     symbol: str,
     portfolio_name: str = "default",
     override_capital: Optional[float] = None,
-    override_holdings: Optional[int] = None
+    override_holdings: Optional[int] = None,
+    user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run analysis for a single symbol"""
     try:
         # Initialize pipeline
-        pipeline = EnhancedTradingPipeline(symbol, portfolio_name)
+        pipeline = EnhancedTradingPipeline(symbol, portfolio_name, user_id=user_id)
+        api_keys = load_env_variables()
         
         # Override settings if provided
         if override_capital:
@@ -153,7 +183,7 @@ async def run_symbol_analysis(
             pipeline.position_tracker.current_position = override_holdings
         
         # Run analysis
-        result = pipeline.run_analysis(api_keys)
+        result = await run_in_threadpool(pipeline.run_analysis, api_keys)
         
         # Check for errors
         if result.get('error'):
@@ -165,8 +195,10 @@ async def run_symbol_analysis(
             }
         
         # Format result
-        formatted_output = format_analysis_result(result)
+        formatted_output = await run_in_threadpool(format_analysis_result, result)
         
+        all_signals = _normalize_all_signals(result.get('all_signals', {}))
+
         # Build response
         response = {
             'symbol': symbol,
@@ -178,17 +210,17 @@ async def run_symbol_analysis(
             'primary_reason': result['primary_reason'],
             'confirming_strategies': result.get('confirming_strategies', 0),
             'conflicting_strategies': result.get('conflicting_strategies', 0),
-            'all_signals': result.get('all_signals', {}),
+            'all_signals': all_signals,
             'risk_parameters': result.get('risk_parameters'),
             'portfolio_context': result.get('portfolio_context', {}),
             'formatted_output': formatted_output
         }
         
         # Add technical indicators if available
-        if 'technical' in result.get('all_signals', {}) and 'indicators' in result['all_signals']['technical']:
-            indicators = result['all_signals']['technical']['indicators']
+        if 'technical' in all_signals and all_signals['technical'].get('indicators'):
+            indicators = all_signals['technical']['indicators']
             response['technical_indicators'] = {
-                'current_price': result['all_signals']['technical'].get('current_price', 0),
+                'current_price': all_signals['technical'].get('current_price', 0),
                 'rsi': indicators.get('rsi'),
                 'macd': indicators.get('macd'),
                 'macd_signal': indicators.get('macd_signal'),
@@ -210,19 +242,25 @@ async def run_symbol_analysis(
         }
 
 
-async def run_portfolio_analysis_task(job_id: str, portfolio_name: str):
+async def run_portfolio_analysis_task(job_id: str, portfolio_name: str, user_id: int):
     """Background task to run portfolio analysis"""
+    db = get_portfolio_manager()
     try:
         # Update job status
-        analysis_jobs[job_id].status = "running"
-        start_time = datetime.utcnow()
+        await run_in_threadpool(
+            db.update_analysis_job,
+            job_id,
+            user_id,
+            status="running",
+        )
+        start_time = datetime.now(timezone.utc)
         
         # Get portfolio and holdings
-        portfolio = portfolio_manager.get_portfolio(portfolio_name)
+        portfolio = await run_in_threadpool(db.get_portfolio, portfolio_name, user_id)
         if not portfolio:
             raise ValueError(f"Portfolio '{portfolio_name}' not found")
         
-        holdings = portfolio_manager.get_holdings(portfolio_name)
+        holdings = await run_in_threadpool(db.get_holdings, portfolio_name, user_id)
         if not holdings:
             raise ValueError(f"No holdings in portfolio '{portfolio_name}'")
         
@@ -239,7 +277,7 @@ async def run_portfolio_analysis_task(job_id: str, portfolio_name: str):
             avg_cost = holding['avg_cost']
             
             # Run analysis
-            result = await run_symbol_analysis(symbol, portfolio_name)
+            result = await run_symbol_analysis(symbol, portfolio_name, user_id=user_id)
             
             if result.get('error'):
                 failed_analyses += 1
@@ -261,15 +299,20 @@ async def run_portfolio_analysis_task(job_id: str, portfolio_name: str):
                 hold_positions.append(recommendation_data)
         
         # Get portfolio value
-        value_info = portfolio_manager.get_portfolio_value(portfolio_name)
+        value_info = await run_in_threadpool(
+            db.get_portfolio_value,
+            portfolio_name,
+            None,
+            user_id,
+        )
         
         # Calculate duration
-        duration = (datetime.utcnow() - start_time).total_seconds()
+        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         
         # Build result
         result = {
             'portfolio_name': portfolio_name,
-            'timestamp': datetime.utcnow(),
+            'timestamp': datetime.now(timezone.utc),
             'total_holdings': len(holdings),
             'analyzed_holdings': len(holdings) - failed_analyses,
             'failed_analyses': failed_analyses,
@@ -282,22 +325,33 @@ async def run_portfolio_analysis_task(job_id: str, portfolio_name: str):
         }
         
         # Update job
-        analysis_jobs[job_id].status = "completed"
-        analysis_jobs[job_id].completed_at = datetime.utcnow()
-        analysis_jobs[job_id].result = result
+        await run_in_threadpool(
+            db.update_analysis_job,
+            job_id,
+            user_id,
+            status="completed",
+            completed_at=datetime.now(timezone.utc),
+            result=result,
+        )
         
     except Exception as e:
         logger.error(f"Portfolio analysis failed: {e}")
-        analysis_jobs[job_id].status = "failed"
-        analysis_jobs[job_id].completed_at = datetime.utcnow()
-        analysis_jobs[job_id].error = str(e)
+        await run_in_threadpool(
+            db.update_analysis_job,
+            job_id,
+            user_id,
+            status="failed",
+            completed_at=datetime.now(timezone.utc),
+            error=str(e),
+        )
 
 
 # API Endpoints
 @router.post("/symbol", response_model=AnalysisResponse)
 async def analyze_symbol(
     request: AnalysisRequest,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Run trading analysis for a single symbol.
@@ -307,7 +361,12 @@ async def analyze_symbol(
     """
     # Verify portfolio exists if specified
     if request.portfolio_name and request.portfolio_name != "default":
-        portfolio = portfolio_manager.get_portfolio(request.portfolio_name)
+        await run_in_threadpool(db.claim_unowned_portfolios, current_user.id)
+        portfolio = await run_in_threadpool(
+            db.get_portfolio,
+            request.portfolio_name,
+            current_user.id,
+        )
         if not portfolio:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -319,7 +378,8 @@ async def analyze_symbol(
         request.symbol,
         request.portfolio_name,
         request.override_capital,
-        request.override_holdings
+        request.override_holdings,
+        current_user.id,
     )
     
     # Check for errors
@@ -335,7 +395,8 @@ async def analyze_symbol(
 @router.post("/batch", response_model=List[AnalysisResponse])
 async def analyze_batch(
     request: BatchAnalysisRequest,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Run trading analysis for multiple symbols.
@@ -345,7 +406,12 @@ async def analyze_batch(
     """
     # Verify portfolio exists if specified
     if request.portfolio_name and request.portfolio_name != "default":
-        portfolio = portfolio_manager.get_portfolio(request.portfolio_name)
+        await run_in_threadpool(db.claim_unowned_portfolios, current_user.id)
+        portfolio = await run_in_threadpool(
+            db.get_portfolio,
+            request.portfolio_name,
+            current_user.id,
+        )
         if not portfolio:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -354,7 +420,7 @@ async def analyze_batch(
     
     # Run analyses concurrently
     tasks = [
-        run_symbol_analysis(symbol, request.portfolio_name)
+        run_symbol_analysis(symbol, request.portfolio_name, user_id=current_user.id)
         for symbol in request.symbols
     ]
     
@@ -368,7 +434,8 @@ async def analyze_batch(
 async def analyze_portfolio(
     portfolio_name: str,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Run analysis for all holdings in a portfolio.
@@ -377,7 +444,8 @@ async def analyze_portfolio(
     in the portfolio and returns a job ID to check status.
     """
     # Verify portfolio exists
-    portfolio = portfolio_manager.get_portfolio(portfolio_name)
+    await run_in_threadpool(db.claim_unowned_portfolios, current_user.id)
+    portfolio = await run_in_threadpool(db.get_portfolio, portfolio_name, current_user.id)
     if not portfolio:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -385,7 +453,7 @@ async def analyze_portfolio(
         )
     
     # Check if portfolio has holdings
-    holdings = portfolio_manager.get_holdings(portfolio_name)
+    holdings = await run_in_threadpool(db.get_holdings, portfolio_name, current_user.id)
     if not holdings:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -393,55 +461,57 @@ async def analyze_portfolio(
         )
     
     # Create job
-    job_id = f"portfolio_{portfolio_name}_{datetime.utcnow().timestamp()}"
-    job = AnalysisStatus(
-        job_id=job_id,
-        status="pending",
-        created_at=datetime.utcnow(),
-        completed_at=None,
-        result=None,
-        error=None
+    job_id = f"portfolio_{portfolio_name}_{datetime.now(timezone.utc).timestamp()}"
+    job = await run_in_threadpool(
+        db.create_analysis_job,
+        job_id,
+        current_user.id,
+        portfolio_name,
+        "pending",
     )
-    analysis_jobs[job_id] = job
     
     # Start background task
-    background_tasks.add_task(run_portfolio_analysis_task, job_id, portfolio_name)
+    background_tasks.add_task(run_portfolio_analysis_task, job_id, portfolio_name, current_user.id)
     
-    return job
+    return AnalysisStatus(**job)
 
 
 @router.get("/portfolio/status/{job_id}", response_model=AnalysisStatus)
 async def get_analysis_status(
     job_id: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Get the status of a portfolio analysis job.
     """
-    if job_id not in analysis_jobs:
+    job = await run_in_threadpool(db.get_analysis_job, job_id, current_user.id)
+    if not job:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Analysis job '{job_id}' not found"
         )
     
-    return analysis_jobs[job_id]
+    return AnalysisStatus(**job)
 
 
 @router.get("/portfolio/result/{job_id}", response_model=PortfolioAnalysisResponse)
 async def get_analysis_result(
     job_id: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Get the result of a completed portfolio analysis job.
     """
-    if job_id not in analysis_jobs:
+    job_data = await run_in_threadpool(db.get_analysis_job, job_id, current_user.id)
+    if not job_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Analysis job '{job_id}' not found"
         )
     
-    job = analysis_jobs[job_id]
+    job = AnalysisStatus(**job_data)
     
     if job.status != "completed":
         raise HTTPException(
@@ -461,15 +531,15 @@ async def get_analysis_result(
 @router.delete("/portfolio/job/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_analysis_job(
     job_id: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: PortfolioManager = Depends(get_portfolio_manager),
 ):
     """
     Delete a completed analysis job.
     """
-    if job_id not in analysis_jobs:
+    deleted = await run_in_threadpool(db.delete_analysis_job, job_id, current_user.id)
+    if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Analysis job '{job_id}' not found"
         )
-    
-    del analysis_jobs[job_id]

@@ -1,34 +1,48 @@
-# Core dependencies
-python-dotenv
-requests
-pandas
-numpy
-ta
-openai
-yfinance
+# Core dependencies (pinned for reproducibility)
+python-dotenv==1.0.1
+requests==2.32.3
+pandas==2.2.3
+numpy==2.1.3
+ta==0.11.0
+openai==1.58.1
+yfinance==0.2.49
 
 # Discord bot
 discord.py==2.5.2
 
-# Database
-# SQLite3 is included with Python
+# Database (SQLite3 is included with Python)
 
 # Machine Learning
-scikit-learn
-joblib
+scikit-learn==1.6.0
+joblib==1.4.2
 
 # Data visualization (for backtesting)
-matplotlib
-seaborn
+matplotlib==3.10.0
+seaborn==0.13.2
 
 # Additional utilities
-python-dateutil
-pytz
+python-dateutil==2.9.0
+pytz==2025.1
 
-# API Server dependencies
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
+# API Server dependencies (updated to latest stable versions)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.5
+pydantic-settings==2.7.1
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.6
+bcrypt==4.0.1
+python-multipart==0.0.18
+PyJWT==2.10.1
+
+# Rate limiting for API endpoints
+slowapi==0.1.9
+
+# Test and quality tooling
+pytest==9.0.2
+pytest-asyncio==1.3.0
+
+# Security scanning (development)
+# Uncomment for security checks: pip install -r requirements-dev.txt
+# bandit==1.7.10
+# safety==3.2.11

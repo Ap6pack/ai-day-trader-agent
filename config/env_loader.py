@@ -14,31 +14,26 @@ load_dotenv()
 
 def load_env_variables() -> Dict[str, Optional[str]]:
     """
-    Load and return all required environment variables.
+    Load and return application environment variables.
     
     Returns:
         Dict containing all environment variables needed by the application
         
-    Raises:
-        ValueError: If required environment variables are missing
+    Market data credentials are optional because providers are tried in order
+    and Yahoo Finance remains available as a no-key fallback.
     """
     env_vars = {
         'DISCORD_BOT_TOKEN': os.getenv('DISCORD_BOT_TOKEN'),
         'DISCORD_GUILD_ID': os.getenv('DISCORD_GUILD_ID'),
         'DISCORD_CHANNEL_ID': os.getenv('DISCORD_CHANNEL_ID'),
+        'ALPACA_API_KEY': os.getenv('ALPACA_API_KEY') or os.getenv('ALPACA_KEY_ID'),
+        'ALPACA_SECRET_KEY': os.getenv('ALPACA_SECRET_KEY') or os.getenv('ALPACA_SECRET'),
         'ALPHA_VANTAGE_API_KEY': os.getenv('ALPHA_VANTAGE_API_KEY'),
         'TWELVE_DATA_API_KEY': os.getenv('TWELVE_DATA_API_KEY'),
         'NEWS_API_KEY': os.getenv('NEWS_API_KEY'),
         'OPENAI_API_KEY': os.getenv('OPENAI_API_KEY'),
     }
-    
-    # Check for critical missing variables
-    critical_vars = ['ALPHA_VANTAGE_API_KEY', 'TWELVE_DATA_API_KEY']
-    missing_critical = [var for var in critical_vars if not env_vars.get(var)]
-    
-    if missing_critical:
-        raise ValueError(f"Missing critical environment variables: {', '.join(missing_critical)}")
-    
+
     return env_vars
 
 
@@ -53,6 +48,8 @@ def get_api_key(service: str) -> Optional[str]:
         API key string or None if not found
     """
     service_map = {
+        'alpaca': 'ALPACA_API_KEY',
+        'alpaca_secret': 'ALPACA_SECRET_KEY',
         'alpha_vantage': 'ALPHA_VANTAGE_API_KEY',
         'twelve_data': 'TWELVE_DATA_API_KEY',
         'news': 'NEWS_API_KEY',
@@ -63,19 +60,16 @@ def get_api_key(service: str) -> Optional[str]:
     env_var_name = service_map.get(service.lower())
     if not env_var_name:
         return None
-        
-    return os.getenv(env_var_name)
+
+    return load_env_variables().get(env_var_name)
 
 
 def validate_environment() -> bool:
     """
-    Validate that all required environment variables are set.
+    Validate that environment variables can be loaded.
     
     Returns:
-        True if all required variables are present, False otherwise
+        True if environment variables can be loaded.
     """
-    try:
-        load_env_variables()
-        return True
-    except ValueError:
-        return False
+    load_env_variables()
+    return True

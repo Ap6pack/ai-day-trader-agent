@@ -10,7 +10,6 @@ import numpy as np
 from datetime import datetime
 from typing import Dict
 import logging
-import yfinance as yf
 
 from core.dividend_strategy import (
     DividendCaptureStrategy, 
@@ -18,7 +17,12 @@ from core.dividend_strategy import (
     DividendEvent
 )
 from core.candle_fetcher import get_candlestick_data
+from core.dividend_provider_config import (
+    active_dividend_providers,
+    dividend_strategy_enabled,
+)
 from core.indicator_engine import compute_indicators
+from core.portfolio_manager_provider import get_portfolio_manager
 from core.sentiment_analyzer import analyze_sentiment
 from core.news_fetcher import get_news_articles
 
@@ -51,9 +55,11 @@ class EnhancedTradingPipeline:
     strength, timing, and market context.
     """
 
-    def __init__(self, symbol: str, portfolio_name: str = "default"):
+    def __init__(self, symbol: str, portfolio_name: str = "default",
+                 user_id: int | None = None):
         self.symbol = symbol
         self.portfolio_name = portfolio_name
+        self.user_id = user_id
         # Import trading config
         from config.settings import trading_config
         self.config = trading_config
@@ -61,18 +67,27 @@ class EnhancedTradingPipeline:
         self.position_tracker = PositionTracker(symbol)
         self.signal_history = []
         
-        # Initialize portfolio manager for context
-        from core.portfolio_manager import PortfolioManager
-        self.portfolio_manager = PortfolioManager()
+        # Reuse the process-scoped manager; each DB operation opens its own
+        # short-lived SQLite connection.
+        self.portfolio_manager = get_portfolio_manager()
         self._load_portfolio_context()
     
     def _load_portfolio_context(self):
         """Load portfolio context and adjust trading parameters."""
-        portfolio = self.portfolio_manager.get_portfolio(self.portfolio_name)
+        portfolio = self.portfolio_manager.get_portfolio(
+            self.portfolio_name,
+            user_id=self.user_id,
+        )
         if portfolio:
             # Get current portfolio value and holdings
-            value_info = self.portfolio_manager.get_portfolio_value(self.portfolio_name)
-            holdings = self.portfolio_manager.get_holdings(self.portfolio_name)
+            value_info = self.portfolio_manager.get_portfolio_value(
+                self.portfolio_name,
+                user_id=self.user_id,
+            )
+            holdings = self.portfolio_manager.get_holdings(
+                self.portfolio_name,
+                user_id=self.user_id,
+            )
             
             # Update trading capital to available cash
             self.config.TRADING_CAPITAL = value_info['cash_available']
@@ -89,8 +104,8 @@ class EnhancedTradingPipeline:
     
     def _prepare_market_data_for_analysis(self, raw_api_data: Dict) -> Dict:
         """Convert dual-API response to format expected by analysis methods."""
-        # Try TwelveData first, then Alpha Vantage
-        for api_source in ['twelvedata', 'alphavantage']:
+        # Respect the fetcher's provider priority while keeping legacy keys supported.
+        for api_source in ['alpaca', 'twelvedata', 'alphavantage', 'yahoo_finance']:
             if api_source in raw_api_data:
                 api_data = raw_api_data[api_source]
                 
@@ -342,6 +357,15 @@ class EnhancedTradingPipeline:
                               api_keys: Dict[str, str]) -> Dict[str, any]:
         """Run dividend capture analysis."""
         try:
+            if not dividend_strategy_enabled():
+                return self._neutral_dividend_signal("Dividend strategy disabled by configuration")
+
+            providers = active_dividend_providers(api_keys)
+            if not providers:
+                return self._neutral_dividend_signal(
+                    "Dividend strategy skipped: no dividend data providers configured"
+                )
+
             # Initialize dividend data fetcher
             fetcher = DividendDataFetcher(api_keys)
             
@@ -370,23 +394,26 @@ class EnhancedTradingPipeline:
                 
                 return signal
             else:
-                return {
-                    'signal': 'HOLD',
-                    'quantity': 0,
-                    'strength': 0,
-                    'priority': SignalPriority.TECHNICAL_WEAK,
-                    'reason': 'No upcoming dividends found'
-                }
+                return self._neutral_dividend_signal('No upcoming dividends found')
                 
         except Exception as e:
             logger.error(f"Dividend analysis error: {e}")
-            return {
-                'signal': 'HOLD',
-                'quantity': 0,
-                'strength': 0,
-                'priority': SignalPriority.TECHNICAL_WEAK,
-                'reason': 'Dividend analysis failed'
-            }
+            return self._neutral_dividend_signal('Dividend analysis failed')
+
+    def _neutral_dividend_signal(self, reason: str) -> Dict[str, any]:
+        """Return a non-actionable dividend signal."""
+        return {
+            'signal': 'HOLD',
+            'quantity': 0,
+            'strength': 0,
+            'confidence': 0.0,
+            'priority': SignalPriority.TECHNICAL_WEAK,
+            'reason': reason,
+            'provider_status': {
+                'enabled': dividend_strategy_enabled(),
+                'active_providers': active_dividend_providers(),
+            },
+        }
     
     def _fuse_signals(self, technical: Dict, sentiment: Dict, 
                      dividend: Dict, price_history: pd.DataFrame) -> Dict[str, any]:
@@ -652,34 +679,13 @@ class EnhancedTradingPipeline:
                     'message': f"Invalid ticker symbol: '{symbol}'. Ticker symbols should be 1-5 letters only."
                 }
             
-            # Try to fetch a simple quote to validate the symbol exists
-            try:
-                ticker = yf.Ticker(symbol)
-                info = ticker.info
-                
-                # Check if we got valid info back
-                if not info or 'symbol' not in info or info.get('regularMarketPrice') is None:
-                    # Try to get some basic data
-                    hist = ticker.history(period="5d")
-                    if hist.empty:
-                        return {
-                            'valid': False,
-                            'message': f"Ticker symbol '{symbol}' not found or has no trading data. Please check the symbol and try again."
-                        }
-                
-                return {
-                    'valid': True,
-                    'message': f"Ticker symbol '{symbol}' is valid"
-                }
-                
-            except Exception as e:
-                # If Yahoo Finance fails, we'll be more lenient and let it through
-                # The market data validation will catch it later
-                logger.warning(f"Could not validate ticker {symbol} with Yahoo Finance: {e}")
-                return {
-                    'valid': True,
-                    'message': f"Ticker symbol '{symbol}' format is valid (could not verify with data source)"
-                }
+            # Provider-backed market-data validation happens immediately after
+            # this check. Avoid a separate Yahoo Finance quote call here; it is
+            # redundant when Alpaca is the primary provider and can trigger 429s.
+            return {
+                'valid': True,
+                'message': f"Ticker symbol '{symbol}' format is valid"
+            }
                 
         except Exception as e:
             logger.error(f"Error validating ticker symbol: {e}")
@@ -774,13 +780,15 @@ class PositionTracker:
 
 
 # Enhanced main execution function
-def run_enhanced_analysis(symbol: str, api_keys: Dict[str, str], portfolio_name: str = "default") -> Dict[str, any]:
+def run_enhanced_analysis(symbol: str, api_keys: Dict[str, str],
+                          portfolio_name: str = "default",
+                          user_id: int | None = None) -> Dict[str, any]:
     """
     Main entry point for enhanced trading analysis.
     
     This replaces the original run_analysis function with our multi-strategy approach.
     """
-    pipeline = EnhancedTradingPipeline(symbol, portfolio_name)
+    pipeline = EnhancedTradingPipeline(symbol, portfolio_name, user_id=user_id)
     result = pipeline.run_analysis(api_keys)
     
     # Handle error cases

@@ -126,6 +126,8 @@ dmypy.json
 # dotenv
 .env
 .env.*
+.env-*
+!.env.example
 
 # Logs
 *.log
@@ -139,6 +141,8 @@ dmypy.json
 
 # Project-specific
 ai_day_trader.log
+SECURITY_REVIEW.md
+SECURITY_FIXES_APPLIED.md
 
 # OS files
 .DS_Store

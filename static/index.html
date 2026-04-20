@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Day Trader</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+
+  <!-- ═══ Login View ═══ -->
+  <div id="login-view">
+    <div class="login-container">
+      <div class="login-card">
+        <h1>AI Day Trader</h1>
+        <p class="subtitle">Trading Dashboard</p>
+
+        <form id="login-form">
+          <div class="form-group">
+            <label class="form-label" for="login-username">Username</label>
+            <input class="form-input" type="text" id="login-username" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="login-password">Password</label>
+            <input class="form-input" type="password" id="login-password" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-block">Sign In</button>
+          <div id="login-error" class="error-msg"></div>
+        </form>
+
+        <p class="toggle-link" id="login-toggle">
+          Don't have an account? <a href="#" id="show-register">Register</a>
+        </p>
+
+        <form id="register-form" style="display:none">
+          <div class="form-group">
+            <label class="form-label" for="reg-username">Username</label>
+            <input class="form-input" type="text" id="reg-username" required minlength="3" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="reg-email">Email</label>
+            <input class="form-input" type="email" id="reg-email" required autocomplete="email">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="reg-password">Password</label>
+            <input class="form-input" type="password" id="reg-password" required minlength="8" autocomplete="new-password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-block">Create Account</button>
+          <div id="register-error" class="error-msg"></div>
+        </form>
+
+        <p class="toggle-link" id="register-toggle" style="display:none">
+          Already have an account? <a href="#" id="show-login">Sign In</a>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Dashboard View ═══ -->
+  <div id="dashboard-view" style="display:none">
+
+    <!-- Top Bar -->
+    <header id="top-bar">
+      <div class="top-bar-left">
+        <span class="logo">AI Day Trader</span>
+      </div>
+      <div class="top-bar-center">
+        <div class="status-indicators">
+          <span class="status-item" id="api-status">
+            <span class="status-dot"></span>
+            <span class="status-label">API</span>
+          </span>
+          <span class="status-item" id="alpaca-status">
+            <span class="status-dot"></span>
+            <span class="status-label">Alpaca</span>
+          </span>
+          <span class="status-item" id="market-status">
+            <span class="status-dot"></span>
+            <span class="status-label">Market</span>
+          </span>
+        </div>
+      </div>
+      <div class="top-bar-right">
+        <span id="user-display"></span>
+        <button id="logout-btn" class="btn btn-sm btn-outline">Logout</button>
+      </div>
+    </header>
+
+    <!-- Three-Column Layout -->
+    <div id="layout">
+
+      <!-- Left Panel -->
+      <aside id="left-panel">
+
+        <div class="panel-section">
+          <div class="section-header">
+            <h3>Portfolios</h3>
+            <button id="create-portfolio-btn" class="btn btn-sm btn-outline" title="Create Portfolio">+</button>
+          </div>
+
+          <form id="create-portfolio-form" class="inline-form" style="display:none">
+            <div class="form-group">
+              <input class="form-input" type="text" id="new-portfolio-name"
+                     placeholder="Portfolio name" required maxlength="50">
+            </div>
+            <div class="form-group">
+              <input class="form-input" type="number" id="new-portfolio-capital"
+                     placeholder="Trading capital" step="0.01" min="0.01" required>
+            </div>
+            <div id="create-portfolio-error" class="error-msg"></div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-sm btn-primary">Create</button>
+              <button type="button" id="cancel-create-portfolio" class="btn btn-sm btn-outline">Cancel</button>
+            </div>
+          </form>
+
+          <div id="portfolio-list"></div>
+        </div>
+
+        <div class="panel-section">
+          <div class="section-header">
+            <h3>Portfolio Actions</h3>
+          </div>
+          <form id="edit-portfolio-form" class="inline-form">
+            <div class="form-group">
+              <label class="form-label" for="edit-portfolio-capital">Trading Capital</label>
+              <input class="form-input" type="number" id="edit-portfolio-capital"
+                     placeholder="Trading capital" step="0.01" min="0.01">
+            </div>
+            <div id="edit-portfolio-error" class="error-msg"></div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-sm btn-primary">Update</button>
+              <button type="button" id="delete-portfolio-btn" class="btn btn-sm btn-danger">Delete</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel-section">
+          <h3>Portfolio Summary</h3>
+          <div id="portfolio-summary-container"></div>
+        </div>
+
+        <div class="panel-section">
+          <div class="section-header">
+            <h3>Holdings</h3>
+            <button id="add-holding-btn" class="btn btn-sm btn-outline" title="Add Holding">+</button>
+          </div>
+          <form id="holding-form" class="inline-form" style="display:none">
+            <div class="form-group">
+              <input class="form-input" type="text" id="holding-symbol" placeholder="Symbol" maxlength="10" required>
+            </div>
+            <div class="form-group">
+              <input class="form-input" type="number" id="holding-quantity" placeholder="Quantity" min="1" step="1" required>
+            </div>
+            <div class="form-group">
+              <input class="form-input" type="number" id="holding-avg-cost" placeholder="Average cost" min="0.01" step="0.01" required>
+            </div>
+            <div id="holding-error" class="error-msg"></div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-sm btn-primary">Save</button>
+              <button type="button" id="cancel-holding" class="btn btn-sm btn-outline">Cancel</button>
+            </div>
+          </form>
+          <div id="holdings-container">
+            <div class="empty-state">Select a portfolio</div>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="section-header">
+            <h3>Trade History</h3>
+            <button id="record-trade-btn" class="btn btn-sm btn-outline" title="Record Trade">+</button>
+          </div>
+          <form id="trade-form" class="inline-form" style="display:none">
+            <div class="form-group">
+              <input class="form-input" type="text" id="trade-symbol" placeholder="Symbol" maxlength="10" required>
+            </div>
+            <div class="form-group">
+              <select class="form-input" id="trade-action" required>
+                <option value="BUY">BUY</option>
+                <option value="SELL">SELL</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <input class="form-input" type="number" id="trade-quantity" placeholder="Quantity" min="1" step="1" required>
+            </div>
+            <div class="form-group">
+              <input class="form-input" type="number" id="trade-price" placeholder="Price" min="0.01" step="0.01" required>
+            </div>
+            <div id="trade-error" class="error-msg"></div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-sm btn-primary">Record</button>
+              <button type="button" id="cancel-trade" class="btn btn-sm btn-outline">Cancel</button>
+            </div>
+          </form>
+          <div id="trades-container">
+            <div class="empty-state">Select a portfolio</div>
+          </div>
+        </div>
+
+      </aside>
+
+      <!-- Main Panel -->
+      <main id="main-panel">
+        <div class="panel-section">
+          <h3>Analyze Ticker</h3>
+          <div class="analysis-input">
+            <input class="form-input" type="text" id="ticker-input"
+                   placeholder="Enter symbol (e.g. AAPL)" maxlength="10" spellcheck="false">
+            <button id="analyze-btn" class="btn btn-primary">Analyze</button>
+          </div>
+
+          <div id="analysis-loading" class="loading" style="display:none">
+            <div class="spinner"></div>
+            <p>Running analysis&hellip;</p>
+          </div>
+
+          <div id="analysis-result"></div>
+        </div>
+      </main>
+
+      <!-- Right Panel -->
+      <aside id="right-panel">
+
+        <div class="panel-section">
+          <h3>Alpaca Account</h3>
+          <div id="alpaca-account-container">
+            <div class="empty-state">Loading&hellip;</div>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Provider Status</h3>
+          <div id="provider-status-container">
+            <div class="empty-state">Loading&hellip;</div>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3>Recent Order</h3>
+          <div id="recent-order-container">
+            <div class="empty-state">No recent orders</div>
+          </div>
+        </div>
+
+      </aside>
+    </div>
+  </div>
+
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

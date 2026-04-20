@@ -22,6 +22,8 @@ import joblib
 import os
 import yfinance as yf
 
+from core.dividend_provider_config import configured_dividend_provider_order
+
 
 logger = logging.getLogger(__name__)
 
@@ -496,7 +498,12 @@ class DividendDataFetcher:
         self.cache = self._load_cache()
         self.twelve_data_premium = None  # Will be auto-detected
         self._api_tier_detected = False
-        self._detect_api_tier()
+        self.provider_order = configured_dividend_provider_order()
+        if "twelve_data" in self.provider_order and self.api_keys.get('TWELVE_DATA_API_KEY'):
+            self._detect_api_tier()
+        else:
+            self.twelve_data_premium = False
+            self._api_tier_detected = True
         
     def _detect_api_tier(self) -> None:
         """Detect Twelve Data API tier to avoid premium endpoint errors."""
@@ -600,52 +607,48 @@ class DividendDataFetcher:
             if (datetime.now() - cache_date).days < 7:  # Cache for 7 days
                 return self._parse_cached_dividends(cached_data['data'])
         
-        # Smart API selection based on detected tier
-        if self.twelve_data_premium:
-            # Try Twelve Data premium endpoints
-            dividends = self._fetch_from_twelve_data(symbol, years)
-            if dividends:
-                logger.info(f"Successfully fetched dividend data from Twelve Data Premium for {symbol}")
-                # Cache the results
-                self.cache[cache_key] = {
-                    'timestamp': datetime.now().isoformat(),
-                    'data': [self._dividend_to_dict(d) for d in dividends],
-                    'source': 'twelve_data'
-                }
-                self._save_cache()
-                return dividends
-        else:
-            # Skip Twelve Data premium endpoints for free users
-            logger.info(f"Using free data sources for dividend information on {symbol}")
-        
-        # Try Alpha Vantage (free tier)
-        dividends = self._fetch_from_alpha_vantage(symbol, years)
-        if dividends:
-            logger.info(f"Successfully fetched dividend data from Alpha Vantage for {symbol}")
-            # Cache the results
-            self.cache[cache_key] = {
-                'timestamp': datetime.now().isoformat(),
-                'data': [self._dividend_to_dict(d) for d in dividends],
-                'source': 'alpha_vantage'
-            }
-            self._save_cache()
-            return dividends
-        
-        # Final fallback to Yahoo Finance (free, unlimited)
-        dividends = self._fetch_from_yahoo_finance(symbol, years)
-        if dividends:
-            logger.info(f"Successfully retrieved dividend information from Yahoo Finance for {symbol}")
-            # Cache the results
-            self.cache[cache_key] = {
-                'timestamp': datetime.now().isoformat(),
-                'data': [self._dividend_to_dict(d) for d in dividends],
-                'source': 'yahoo_finance'
-            }
-            self._save_cache()
-            return dividends
+        for provider in self.provider_order:
+            if provider == "twelve_data":
+                if not self.api_keys.get('TWELVE_DATA_API_KEY'):
+                    logger.info("Skipping Twelve Data dividend provider: not configured")
+                    continue
+                if not self.twelve_data_premium:
+                    logger.info(f"Skipping Twelve Data dividend provider for {symbol}: premium endpoint unavailable")
+                    continue
+                dividends = self._fetch_from_twelve_data(symbol, years)
+                if dividends:
+                    logger.info(f"Successfully fetched dividend data from Twelve Data Premium for {symbol}")
+                    self._cache_dividends(cache_key, dividends, provider)
+                    return dividends
+
+            elif provider == "alpha_vantage":
+                if not self.api_keys.get('ALPHA_VANTAGE_API_KEY'):
+                    logger.info("Skipping Alpha Vantage dividend provider: not configured")
+                    continue
+                dividends = self._fetch_from_alpha_vantage(symbol, years)
+                if dividends:
+                    logger.info(f"Successfully fetched dividend data from Alpha Vantage for {symbol}")
+                    self._cache_dividends(cache_key, dividends, provider)
+                    return dividends
+
+            elif provider == "yahoo_finance":
+                dividends = self._fetch_from_yahoo_finance(symbol, years)
+                if dividends:
+                    logger.info(f"Successfully retrieved dividend information from Yahoo Finance for {symbol}")
+                    self._cache_dividends(cache_key, dividends, provider)
+                    return dividends
         
         logger.warning(f"No dividend data available for {symbol}")
         return []
+
+    def _cache_dividends(self, cache_key: str, dividends: List[DividendEvent], source: str) -> None:
+        """Cache parsed dividend events with source metadata."""
+        self.cache[cache_key] = {
+            'timestamp': datetime.now().isoformat(),
+            'data': [self._dividend_to_dict(d) for d in dividends],
+            'source': source
+        }
+        self._save_cache()
     
     def _fetch_from_twelve_data(self, symbol: str, years: int) -> List[DividendEvent]:
         """Fetch dividend data from Twelve Data API."""

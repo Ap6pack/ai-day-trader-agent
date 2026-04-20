@@ -30,7 +30,7 @@ def main():
     
     # Security warning for JWT secret
     jwt_secret = os.getenv("JWT_SECRET_KEY")
-    if not jwt_secret or jwt_secret == "CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET":
+    if not jwt_secret or jwt_secret == "dev_secret_key_for_testing_only_change_in_production":
         print("\n⚠️  WARNING: Using default JWT secret key!")
         print("   Set JWT_SECRET_KEY environment variable for production use.")
         print("   Generate a secure key with: openssl rand -hex 32\n")
@@ -46,10 +46,6 @@ Log Level: {log_level}
 
 📚 API Documentation: http://localhost:{port}/docs
 📊 ReDoc: http://localhost:{port}/redoc
-
-Default credentials:
-- Username: admin
-- Password: secret
 """)
     
     # Run the server
