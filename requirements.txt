@@ -5,6 +5,7 @@ pandas==2.2.3
 numpy==2.1.3
 ta==0.11.0
 openai==1.58.1
+typesafe-sdk==0.7.2
 yfinance==0.2.49
 
 # Discord bot
@@ -27,7 +28,7 @@ pytz==2025.1
 # API Server dependencies (updated to latest stable versions)
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-pydantic==2.10.5
+pydantic==2.13.5
 pydantic-settings==2.7.1
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
