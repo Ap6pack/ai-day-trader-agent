@@ -118,7 +118,24 @@ Suggested schedule (weekdays, `CRON_TZ=America/New_York`):
 ```
 25 9  * * 1-5  cd /path/to/ai-day-trader-agent && timeout 7h .venv/bin/python -m trader.newsbot run >> data/newsbot.log 2>&1
 50 15 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.newsbot flatten >> data/newsbot.log 2>&1
+20 16 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.autopilot score >> data/autopilot.log 2>&1
+40 16 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.autopilot review >> data/autopilot.log 2>&1
 ```
+
+`python -m trader.autopilot cron` prints these lines with your real paths.
+
+### Claude's daily review
+
+After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, with
+`--permission-mode dontAsk` and a short tool allowlist that never includes order placement):
+
+- `score` fills in each pending decision's outcome from the day's close.
+- `review` reads the journal and writes `data/runs/<time>-review/report.md`: signals,
+  trades, hit rate and return by event type and probability bucket, latency, and proposed
+  `NEWSBOT_*` changes with their evidence and sample size. It never edits `.env`; you apply
+  changes you agree with.
+- `run` (optional) has Claude analyze the scan shortlist in review mode.
+- `check` shows the setup and the MCP server names Claude Code sees.
 
 ## Commands
 
@@ -130,6 +147,7 @@ Suggested schedule (weekdays, `CRON_TZ=America/New_York`):
 | `python -m trader.sizing --symbol S --side buy --price P --equity E [...]` | Max quantity and stop-loss |
 | `python -m trader.journal decide ...` / `list` / `events` / `pending` / `outcome` / `summary` | Journal |
 | `python -m trader.newsbot run` / `replay SYMBOL [--hours H]` / `flatten` | Autonomous Alpaca paper news bot |
+| `python -m trader.autopilot score` / `review` / `run` / `check` / `cron` | Claude's scheduled runs |
 
 ## Tests
 

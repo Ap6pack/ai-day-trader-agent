@@ -7,6 +7,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- `trader.autopilot`: Claude's unattended after-close runs. `score` records outcomes,
+  `review` reports the news bot's results by event type and probability bucket with
+  proposed `NEWSBOT_*` changes (never applied automatically), optional `run` analyzes the
+  scan shortlist, `check` and `cron` help set it up. Its tool allowlist never includes
+  order placement.
 - `trader.newsbot`: autonomous news trading on the Alpaca paper account (PLAN Phase 3).
   Streams Alpaca news, judges each headline and symbol with Jev, applies the
   `NEWSBOT_*` thresholds and places bracket orders with a size per trade, a daily cap,

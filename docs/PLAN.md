@@ -63,9 +63,8 @@ Alpaca news stream ─► trader.newsbot ─► Jev (one request per headline, ~
 
 ### Status
 
-Built: `trader/alpaca.py`, `trader/newsbot.py` and their tests. Not built yet:
-`trader/autopilot.py` (Claude's after-close scoring and review). Differences from the
-design below:
+Built: `trader/alpaca.py`, `trader/newsbot.py`, `trader/autopilot.py` and their tests.
+Differences from the design below:
 
 - `run` flattens itself `NEWSBOT_FLATTEN_MINUTES` (default 10) before the close from
   Alpaca's clock, so early-close days (13:00) are covered; the 15:50 cron `flatten` is a

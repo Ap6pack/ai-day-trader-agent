@@ -104,6 +104,16 @@ decision's trading day (`get_equity_historicals`, `interval="day"`) and record i
 suggest moving from review to live mode when the user asks, and show them the summary
 when they do: a small sample proves little.
 
+## Scheduled runs (autopilot)
+
+`python -m trader.autopilot` starts you unattended (`claude -p`) for `score`, `review` and
+the optional shortlist `run`. Nobody can answer questions in those runs: put anything that
+needs the user in the final report. The account number in a run prompt comes from the
+user's configuration. Never place orders in an autopilot run. The news bot
+(`trader.newsbot`) does its own Alpaca paper trading; your job is to measure and tune it:
+report results by event type and probability bucket, and propose `NEWSBOT_*` changes with
+their evidence and sample size. Never edit `.env` yourself.
+
 ## When something fails
 - Guard denial: quote the reason and stop. Do not retry the same order in another form.
 - `trader.news` errors or has no source: continue without news and say so.
