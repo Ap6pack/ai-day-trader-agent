@@ -157,3 +157,6 @@ $RECYCLE.BIN/
 
 # VSCode
 .vscode/
+
+# Journal, bot logs and Claude run reports (may contain account details)
+data/
