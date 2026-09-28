@@ -17,6 +17,8 @@ from typing import Dict, Optional
 import requests
 from dotenv import load_dotenv
 
+from core.event_bus import publish_event
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,25 @@ class AlpacaExecutor:
         resp.raise_for_status()
         return resp.json()
 
+    def get_orders(self, status: str = "all", limit: int = 50) -> list:
+        """Return recent orders, newest first."""
+        resp = requests.get(
+            f"{self.base_url}/orders",
+            headers=self.headers,
+            params={"status": status, "limit": limit, "direction": "desc"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_clock(self) -> Dict:
+        """Return the market clock (is_open, next_open, next_close)."""
+        resp = requests.get(
+            f"{self.base_url}/clock", headers=self.headers, timeout=10
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def get_position(self, symbol: str) -> Optional[Dict]:
         """Return a single open position, or None if not held."""
         try:
@@ -121,6 +142,8 @@ class AlpacaExecutor:
 
         if action == "HOLD" or quantity <= 0 or not symbol:
             logger.info(f"Skipping execution: {action} {quantity} {symbol}")
+            publish_event("order_skipped", f"Skipped execution: {action} {quantity} {symbol}",
+                          symbol=symbol or None)
             return None
 
         # Safety check — make sure market is open (paper trading still
@@ -164,9 +187,23 @@ class AlpacaExecutor:
 
         if not resp.ok:
             logger.error(f"Order failed: {resp.status_code} {resp.text}")
+            publish_event(
+                "order_failed",
+                f"Order rejected: {side.upper()} {quantity} {symbol} (HTTP {resp.status_code})",
+                level="error",
+                symbol=symbol,
+                data={"status_code": resp.status_code, "detail": resp.text[:500]},
+            )
             resp.raise_for_status()
 
         order = resp.json()
+        publish_event(
+            "order_submitted",
+            f"Paper order {order.get('status', 'submitted')}: {side.upper()} {quantity} {symbol}",
+            level="buy" if side == "buy" else "sell",
+            symbol=symbol,
+            data=order,
+        )
         logger.info(
             f"Order placed — ID: {order['id']} | "
             f"{order['side'].upper()} {order['qty']} {order['symbol']} "
@@ -180,6 +217,8 @@ class AlpacaExecutor:
 
         if not position:
             logger.warning(f"SELL skipped: no position in {symbol}")
+            publish_event("order_skipped", f"SELL skipped: no Alpaca position in {symbol}",
+                          level="warning", symbol=symbol)
             return None
 
         owned = int(float(position.get("qty", 0)))

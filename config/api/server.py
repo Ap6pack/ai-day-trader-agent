@@ -4,6 +4,8 @@ Main FastAPI server for AI Day Trader Agent API Layer.
 Implements secure, standards-compliant REST endpoints for portfolio management and trading.
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -21,12 +23,22 @@ from config.api.portfolios import router as portfolios_router
 from config.api.analysis import router as analysis_router
 from config.api.trading import router as trading_router
 from config.api.websockets import websocket_endpoint
+from config.api.desk import router as desk_router, desk_websocket, autopilot, hub
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ai_day_trader_api")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # Stop desk pollers and autopilot loops so shutdown does not hang on them.
+    await autopilot.stop_all()
+    await hub.shutdown()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="AI Day Trader Agent API",
     description="Secure REST API for portfolio management, trading, and analysis.",
     version="1.0.0",
@@ -59,6 +71,7 @@ app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(portfolios_router, prefix="/api/portfolios", tags=["portfolios"])
 app.include_router(analysis_router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(trading_router, prefix="/api/trading", tags=["trading"])
+app.include_router(desk_router, prefix="/api/desk", tags=["desk"])
 
 # Global error handler
 @app.exception_handler(Exception)
@@ -75,6 +88,8 @@ async def health_check():
 
 # WebSocket endpoint
 app.websocket("/ws")(websocket_endpoint)
+app.websocket("/ws/desk")(desk_websocket)
+
 
 # Dashboard
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -83,6 +98,12 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 async def dashboard():
     """Serve the trading dashboard."""
     html_file = PROJECT_ROOT / "static" / "index.html"
+    return HTMLResponse(content=html_file.read_text())
+
+@app.get("/desk", response_class=HTMLResponse, include_in_schema=False)
+async def trading_desk():
+    """Serve the live trading desk."""
+    html_file = PROJECT_ROOT / "static" / "desk.html"
     return HTMLResponse(content=html_file.read_text())
 
 app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="static")

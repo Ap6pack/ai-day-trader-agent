@@ -21,10 +21,11 @@ from core.dividend_provider_config import (
     active_dividend_providers,
     dividend_strategy_enabled,
 )
-from core.indicator_engine import compute_indicators
+from core.indicator_engine import compute_indicators, sort_candlesticks
 from core.portfolio_manager_provider import get_portfolio_manager
 from core.sentiment_analyzer import analyze_sentiment
 from core.news_fetcher import get_news_articles
+from core.event_bus import publish_event
 
 def _configure_sqlite_adapters():
     """Configure SQLite datetime adapters for Python 3.12+ compatibility."""
@@ -105,7 +106,7 @@ class EnhancedTradingPipeline:
     def _prepare_market_data_for_analysis(self, raw_api_data: Dict) -> Dict:
         """Convert dual-API response to format expected by analysis methods."""
         # Respect the fetcher's provider priority while keeping legacy keys supported.
-        for api_source in ['alpaca', 'twelvedata', 'alphavantage', 'yahoo_finance']:
+        for api_source in ['alpaca', 'twelvedata', 'alphavantage', 'yahoo_finance', 'demo']:
             if api_source in raw_api_data:
                 api_data = raw_api_data[api_source]
                 
@@ -154,9 +155,10 @@ class EnhancedTradingPipeline:
                                     except (ValueError, TypeError):
                                         continue  # Skip invalid data
                             
-                            # Only return if we have at least some data
+                            # Only return if we have at least some data. Providers
+                            # return newest-first; analysis expects oldest-first.
                             if len(candlesticks['close']) > 0:
-                                return {'candlesticks': candlesticks}
+                                return {'candlesticks': sort_candlesticks(candlesticks)}
         
         # Fallback: return empty structure with at least one dummy data point to prevent index errors
         return {
@@ -178,10 +180,13 @@ class EnhancedTradingPipeline:
         and use sophisticated logic to determine the best action.
         """
         logger.info(f"Running enhanced analysis for {self.symbol}")
+        self._publish("analysis_started", f"Analysis started for {self.symbol}",
+                      data={"portfolio": self.portfolio_name})
         
         # Validate ticker symbol first
         validation_result = self._validate_ticker_symbol(self.symbol)
         if not validation_result['valid']:
+            self._publish("analysis_error", validation_result['message'], level="error")
             return {
                 'error': True,
                 'error_type': 'invalid_ticker',
@@ -196,6 +201,7 @@ class EnhancedTradingPipeline:
         
         # Check if we have valid market data
         if not self._has_valid_market_data(market_data):
+            self._publish("analysis_error", f"No market data available for {self.symbol}", level="error")
             return {
                 'error': True,
                 'error_type': 'no_data',
@@ -205,15 +211,27 @@ class EnhancedTradingPipeline:
             }
         
         price_history = self._prepare_price_history(market_data)
+        data_source = next(
+            (name for name, intervals in raw_market_data.items()
+             if isinstance(intervals, dict) and any(intervals.values())),
+            None,
+        )
+        self._publish("market_data", f"Loaded {len(market_data['candlesticks']['close'])} bars "
+                      f"for {self.symbol} from {data_source or 'unknown'}",
+                      data={"source": data_source,
+                            "bars": len(market_data['candlesticks']['close'])})
         
         # Run traditional technical analysis
         technical_signals = self._run_technical_analysis(market_data)
+        self._publish_strategy("technical", technical_signals)
         
         # Run sentiment analysis
         sentiment_signals = self._run_sentiment_analyzer(self.symbol, api_keys)
+        self._publish_strategy("sentiment", sentiment_signals)
         
         # Run dividend capture analysis
         dividend_signals = self._run_dividend_analysis(price_history, market_data, api_keys)
+        self._publish_strategy("dividend", dividend_signals)
         
         # Combine all signals intelligently
         final_decision = self._fuse_signals(
@@ -225,8 +243,29 @@ class EnhancedTradingPipeline:
         
         # Track the decision for future analysis
         self._record_decision(final_decision)
+        self._publish(
+            "decision",
+            f"{self.symbol}: {final_decision['signal']} {final_decision['quantity']} "
+            f"({final_decision['confidence']:.0%} conf) via {final_decision['primary_strategy']}",
+            level={"BUY": "buy", "SELL": "sell"}.get(final_decision['signal'], "info"),
+            data=final_decision,
+        )
         
         return final_decision
+
+    def _publish(self, event_type: str, message: str, level: str = "info", data: Dict = None) -> None:
+        publish_event(event_type, message, level=level, symbol=self.symbol,
+                      user_id=self.user_id, data=data)
+
+    def _publish_strategy(self, strategy: str, signal: Dict) -> None:
+        signal = signal or {}
+        strength = signal.get('strength', signal.get('confidence', 0)) or 0
+        self._publish(
+            "strategy_signal",
+            f"{strategy.title()}: {signal.get('signal', 'HOLD')} "
+            f"({float(strength):.0%}) - {signal.get('reason', '')}",
+            data={"strategy": strategy, **signal},
+        )
     
     def _run_technical_analysis(self, market_data: Dict) -> Dict[str, any]:
         """Run traditional technical indicator analysis."""
@@ -658,6 +697,7 @@ class EnhancedTradingPipeline:
         # Add datetime index if available
         if 'datetime' in candlesticks:
             df.index = pd.to_datetime(candlesticks['datetime'])
+            df = df.sort_index(kind='stable')
         
         return df
     

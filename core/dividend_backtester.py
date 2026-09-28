@@ -673,6 +673,8 @@ def fetch_price_data_for_backtest(symbol: str, start_date: datetime,
         # Add datetime index
         if 'datetime' in market_data['candlesticks']:
             df.index = pd.to_datetime(market_data['candlesticks']['datetime'])
+            # Providers return newest-first; the backtest walks forward in time.
+            df = df.sort_index(kind='stable')
         else:
             # Create synthetic dates if not provided
             df.index = pd.date_range(end=datetime.now(), periods=len(df), freq='D')

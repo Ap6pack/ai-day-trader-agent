@@ -217,5 +217,19 @@ const API = (() => {
         portfolio_name: portfolioName || 'default',
       });
     },
+
+    /* Live desk */
+    getAccessToken,
+    refreshAccessToken,
+    getDeskConfig()   { return request('GET', '/desk/config'); },
+    getDeskAccount()  { return request('GET', '/desk/account'); },
+    getDeskNews(sym)  { return request('GET', `/desk/news/${encodeURIComponent(sym)}`); },
+    getDeskBars(sym, timeframe, limit = 300) {
+      return request('GET', `/desk/bars/${encodeURIComponent(sym)}?timeframe=${encodeURIComponent(timeframe)}&limit=${limit}`);
+    },
+    cancelOrder(id)   { return request('POST', `/desk/orders/${encodeURIComponent(id)}/cancel`); },
+    getAutopilot()    { return request('GET', '/desk/autopilot'); },
+    startAutopilot(cfg) { return request('POST', '/desk/autopilot', cfg); },
+    stopAutopilot()   { return request('DELETE', '/desk/autopilot'); },
   };
 })();

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADT Desk</title>
+  <link rel="stylesheet" href="/static/css/desk.css">
+</head>
+<body>
+
+  <!-- ═══ Login ═══ -->
+  <div id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <div class="brand brand-lg">ADT<span>&#9656;</span>DESK</div>
+      <p class="muted">Sign in to the live trading desk</p>
+      <label>USER <input id="login-user" autocomplete="username" required></label>
+      <label>PASS <input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <button class="btn btn-go" type="submit">&lt;GO&gt;</button>
+      <div id="login-error" class="err"></div>
+      <p class="muted small">No account? Create one on the <a href="/dashboard">classic dashboard</a>.</p>
+    </form>
+  </div>
+
+  <!-- ═══ Desk ═══ -->
+  <div id="desk" class="desk" hidden>
+
+    <header class="topbar">
+      <div class="brand">ADT<span>&#9656;</span>DESK</div>
+      <form id="cmd-form" class="cmd">
+        <span class="cmd-prompt">&gt;</span>
+        <input id="cmd" autocomplete="off" spellcheck="false"
+               placeholder="Ticker or command — AAPL &lt;GO&gt;  ·  AAPL AN  ·  ADD TSLA  ·  AP ON  ·  HELP">
+        <button class="btn btn-go" type="submit">GO</button>
+      </form>
+      <div class="top-stats">
+        <div class="stat"><span class="k">EQUITY</span><span class="v" id="t-equity">—</span></div>
+        <div class="stat"><span class="k">DAY P&amp;L</span><span class="v" id="t-daypl">—</span></div>
+        <div class="stat"><span class="k">BP</span><span class="v" id="t-bp">—</span></div>
+        <div class="stat"><span class="k" id="t-mkt-label">MARKET</span><span class="v" id="t-mkt">—</span></div>
+        <div class="stat"><span class="k">NEW YORK</span><span class="v mono" id="t-clock">--:--:--</span></div>
+      </div>
+      <div class="top-right">
+        <span id="demo-badge" class="badge badge-demo" hidden title="Quotes and bars are simulated (DESK_DEMO_MODE=true)">DEMO DATA</span>
+        <span id="ap-badge" class="badge badge-ap" hidden>AUTOPILOT</span>
+        <span class="conn" id="conn" title="Live stream"><i></i><b>OFFLINE</b></span>
+        <span id="user" class="muted"></span>
+        <button id="logout" class="btn btn-ghost">EXIT</button>
+      </div>
+    </header>
+
+    <div class="tape" id="tape"><div class="tape-track" id="tape-track"></div></div>
+
+    <main class="grid">
+
+      <!-- Watchlist -->
+      <section class="panel p-watch">
+        <div class="ph"><h2>WATCHLIST</h2><span class="ph-sub" id="watch-count"></span>
+          <form id="watch-add" class="ph-form"><input id="watch-input" placeholder="+ SYM" maxlength="10" spellcheck="false"></form>
+        </div>
+        <div class="pb scroll">
+          <table class="tbl tbl-watch">
+            <thead><tr><th>SYM</th><th class="r">LAST</th><th class="r">CHG</th><th class="r">%CHG</th><th class="r">VOL</th><th></th></tr></thead>
+            <tbody id="watch-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Positions -->
+      <section class="panel p-pos">
+        <div class="ph"><h2>POSITIONS</h2><span class="ph-sub">ALPACA PAPER</span><span class="ph-sub r" id="pos-upl"></span></div>
+        <div class="pb scroll">
+          <table class="tbl">
+            <thead><tr><th>SYM</th><th class="r">QTY</th><th class="r">AVG</th><th class="r">LAST</th><th class="r">U P&amp;L</th><th class="r">%</th></tr></thead>
+            <tbody id="pos-body"><tr><td colspan="6" class="empty">—</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Chart -->
+      <section class="panel p-chart">
+        <div class="ph ph-quote">
+          <div class="q-sym" id="q-sym">—</div>
+          <div class="q-last" id="q-last">—</div>
+          <div class="q-chg" id="q-chg"></div>
+          <div class="q-grid">
+            <span>BID <b id="q-bid">—</b></span><span>ASK <b id="q-ask">—</b></span>
+            <span>O <b id="q-open">—</b></span><span>H <b id="q-high">—</b></span>
+            <span>L <b id="q-low">—</b></span><span>VOL <b id="q-vol">—</b></span>
+          </div>
+          <div class="ph-tools">
+            <div class="seg" id="tf-seg"></div>
+            <div class="seg" id="ind-seg">
+              <button data-ind="sma" class="on">SMA20</button>
+              <button data-ind="ema" class="on">EMA9</button>
+              <button data-ind="vwap">VWAP</button>
+              <button data-ind="levels" class="on" title="Agent stop / target levels">LEVELS</button>
+            </div>
+            <button class="btn btn-amber" id="analyze-btn">ANALYZE</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <div id="chart"></div>
+          <div class="chart-legend" id="chart-legend"></div>
+          <div class="chart-msg" id="chart-msg" hidden></div>
+        </div>
+      </section>
+
+      <!-- Agent signal -->
+      <section class="panel p-signal">
+        <div class="ph"><h2>AGENT SIGNAL</h2><span class="ph-sub" id="sig-time"></span></div>
+        <div class="pb" id="signal-body">
+          <div class="empty">Press ANALYZE (or type <kbd>SYM AN</kbd>) to run the multi-strategy agent on this symbol.</div>
+        </div>
+      </section>
+
+      <!-- Activity -->
+      <section class="panel p-feed">
+        <div class="ph"><h2>AGENT ACTIVITY</h2><span class="live-dot"></span>
+          <div class="seg seg-sm" id="feed-filter">
+            <button data-f="all" class="on">ALL</button>
+            <button data-f="signal">SIGNALS</button>
+            <button data-f="order">ORDERS</button>
+            <button data-f="system">SYS</button>
+          </div>
+        </div>
+        <div class="pb scroll" id="feed"></div>
+      </section>
+
+      <!-- News -->
+      <section class="panel p-news">
+        <div class="ph"><h2>NEWS</h2><span class="ph-sub" id="news-sym"></span></div>
+        <div class="pb scroll" id="news"></div>
+      </section>
+
+      <!-- Blotter -->
+      <section class="panel p-orders">
+        <div class="ph"><h2>ORDER BLOTTER</h2><span class="ph-sub">ALPACA PAPER</span></div>
+        <div class="pb scroll">
+          <table class="tbl">
+            <thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th class="r">QTY</th><th class="r">FILLED</th><th class="r">PRICE</th><th>STATUS</th><th></th></tr></thead>
+            <tbody id="orders-body"><tr><td colspan="8" class="empty">—</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Ticket -->
+      <section class="panel p-ticket">
+        <div class="ph"><h2>ORDER TICKET</h2><span class="ph-sub">PAPER · MKT · DAY</span></div>
+        <form class="pb ticket" id="ticket">
+          <div class="side-toggle">
+            <button type="button" data-side="BUY" class="on buy">BUY</button>
+            <button type="button" data-side="SELL" class="sell">SELL</button>
+          </div>
+          <label>SYMBOL <input id="tk-sym" maxlength="10" spellcheck="false" required></label>
+          <label>QTY <input id="tk-qty" type="number" min="1" step="1" value="1" required></label>
+          <div class="tk-est">EST <b id="tk-est">—</b></div>
+          <button class="btn btn-buy" id="tk-submit" type="submit">SEND BUY</button>
+          <div class="tk-msg" id="tk-msg"></div>
+        </form>
+      </section>
+
+      <!-- Autopilot -->
+      <section class="panel p-auto">
+        <div class="ph"><h2>AUTOPILOT</h2><span class="ph-sub" id="ap-state">OFF</span></div>
+        <form class="pb auto" id="ap-form">
+          <label class="wide">SYMBOLS <input id="ap-syms" spellcheck="false" placeholder="uses watchlist"></label>
+          <label>EVERY
+            <select id="ap-interval">
+              <option value="60">1 min</option><option value="300" selected>5 min</option>
+              <option value="900">15 min</option><option value="1800">30 min</option><option value="3600">1 hr</option>
+            </select>
+          </label>
+          <label>PORTFOLIO <input id="ap-portfolio" value="default" spellcheck="false"></label>
+          <label class="wide">MODE
+            <select id="ap-mode">
+              <option value="signals">Signals only — watch, don't trade</option>
+              <option value="record">Record paper trades locally</option>
+              <option value="paper">Send Alpaca paper orders</option>
+            </select>
+          </label>
+          <div class="ap-status wide" id="ap-status"></div>
+          <button class="btn btn-amber wide" id="ap-toggle" type="submit">START AUTOPILOT</button>
+        </form>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="help" class="modal" hidden>
+    <div class="modal-card">
+      <h2>COMMANDS</h2>
+      <table class="tbl">
+        <tr><td><kbd>AAPL</kbd> <kbd>&lt;GO&gt;</kbd></td><td>Load symbol into chart, quote, news and ticket</td></tr>
+        <tr><td><kbd>AAPL AN</kbd></td><td>Load and run the agent's analysis</td></tr>
+        <tr><td><kbd>ADD TSLA</kbd> / <kbd>DEL TSLA</kbd></td><td>Add / remove from watchlist</td></tr>
+        <tr><td><kbd>BUY 10</kbd> / <kbd>SELL 10</kbd></td><td>Pre-fill the order ticket for the loaded symbol</td></tr>
+        <tr><td><kbd>AP ON</kbd> / <kbd>AP OFF</kbd></td><td>Start / stop autopilot with the panel settings</td></tr>
+        <tr><td><kbd>1M 5M 15M 1H 1D</kbd></td><td>Chart timeframe</td></tr>
+        <tr><td><kbd>/</kbd></td><td>Focus the command line from anywhere</td></tr>
+        <tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>Move through the watchlist</td></tr>
+      </table>
+      <button class="btn btn-ghost" id="help-close">CLOSE</button>
+    </div>
+  </div>
+
+  <script src="/static/vendor/lightweight-charts/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/desk.js"></script>
+</body>
+</html>

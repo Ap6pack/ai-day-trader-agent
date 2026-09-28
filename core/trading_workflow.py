@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from config.env_loader import load_env_variables
+from core.event_bus import publish_event
 from core.pipeline import run_enhanced_analysis
 from core.portfolio_manager import PortfolioManager
 
@@ -142,6 +143,22 @@ class TradingWorkflow:
             confidence=self._extract_confidence(analysis),
             notes=notes,
             user_id=user_id,
+        )
+
+        publish_event(
+            "trade_recorded",
+            f"Recorded {action} {quantity} {symbol} @ ${price:,.2f} in '{portfolio_name}'",
+            level="buy" if action == "BUY" else "sell",
+            symbol=symbol,
+            user_id=user_id,
+            data={
+                "trade_id": trade_id,
+                "portfolio_name": portfolio_name,
+                "action": action,
+                "quantity": quantity,
+                "price": price,
+                "alpaca_order_id": (alpaca_order or {}).get("id"),
+            },
         )
 
         return WorkflowResult(

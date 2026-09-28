@@ -178,6 +178,29 @@ The AI Day Trader Agent now includes a professional REST API with WebSocket supp
 
 **📚 For complete API documentation, examples, and WebSocket usage, see [API_DOCUMENTATION.md](API_DOCUMENTATION.md)**
 
+### Live Trading Desk
+
+A Bloomberg / thinkorswim-style terminal for watching the agent work in real time:
+
+![Live trading desk (demo mode)](docs/images/live-desk.png)
+
+```bash
+python api_server.py
+# open http://localhost:8000/desk and sign in
+```
+
+- **Streaming watchlist and ticker tape**: prices flash green or red on every tick. Quotes come from one batched Alpaca snapshot call, with Yahoo Finance as the fallback.
+- **Live candlestick chart** (1m/5m/15m/1h/1d) with volume, SMA20, EMA9 and VWAP. The forming candle updates as quotes arrive. After an analysis, the agent's entry, stop and target are drawn on the chart.
+- **Agent signal panel**: the BUY/SELL/HOLD call, confidence, how each strategy (technical, sentiment, dividend) voted and why, plus risk parameters.
+- **Agent activity feed**: every pipeline step streams in as it happens (data loaded, each strategy's signal, the final decision, orders submitted, rejected or skipped, trades recorded).
+- **Autopilot**: the agent re-scans a list of symbols on a timer. It has three modes: *signals only* (the default; nothing is traded), *record local paper trades*, or *send Alpaca paper orders*.
+- **Alpaca paper account**: equity, day P&L, buying power, positions, an order blotter with cancel, and a market clock.
+- **Paper order ticket** and a **command line**: type anywhere, e.g. `NVDA <GO>`, `NVDA AN` (analyze), `ADD TSLA`, `BUY 10`, `AP ON`, `5M`, or `HELP`.
+
+Try it without API keys by setting `DESK_DEMO_MODE=true`. Quotes and bars then come from a seeded simulator, the analysis pipeline runs on the simulated candles, and the desk shows a **DEMO DATA** badge. Other settings: `DESK_WATCHLIST` (default symbols), `DESK_QUOTE_INTERVAL` and `DESK_ACCOUNT_INTERVAL` (polling in seconds).
+
+The desk streams events from an in-process event bus, so run the API with `API_WORKERS=1` (the default).
+
 ### Trade Analysis
 
 #### With Portfolio Context
