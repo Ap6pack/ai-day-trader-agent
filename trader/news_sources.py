@@ -33,8 +33,19 @@ def _clean_text(text):
     return " ".join(unescape(_TAG_RE.sub(" ", text or "")).split())
 
 
-def _alpaca_configured():
+def alpaca_configured():
     return bool(secret("ALPACA_API_KEY") and secret("ALPACA_SECRET_KEY"))
+
+
+def alpaca_headers():
+    return {
+        "APCA-API-KEY-ID": secret("ALPACA_API_KEY"),
+        "APCA-API-SECRET-KEY": secret("ALPACA_SECRET_KEY"),
+    }
+
+
+def alpaca_data_url(path):
+    return (secret("ALPACA_DATA_BASE_URL") or DEFAULT_ALPACA_DATA_URL).rstrip("/") + path
 
 
 def _normalize_alpaca(item):
@@ -56,11 +67,8 @@ def get_alpaca_news(symbol, since=None, limit=ALPACA_MAX_LIMIT):
     Raises on HTTP errors so callers can fall back.
     """
     since = since or datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    url = (secret("ALPACA_DATA_BASE_URL") or DEFAULT_ALPACA_DATA_URL).rstrip("/") + ALPACA_NEWS_PATH
-    headers = {
-        "APCA-API-KEY-ID": secret("ALPACA_API_KEY"),
-        "APCA-API-SECRET-KEY": secret("ALPACA_SECRET_KEY"),
-    }
+    url = alpaca_data_url(ALPACA_NEWS_PATH)
+    headers = alpaca_headers()
     params = {
         "symbols": symbol,
         "start": since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -109,7 +117,7 @@ def get_news_articles(symbol):
     Fetch recent news for `symbol`: Alpaca first, NewsAPI as fallback.
     Returns a list of NewsAPI-shaped articles (empty if no source works).
     """
-    if _alpaca_configured():
+    if alpaca_configured():
         try:
             articles = get_alpaca_news(symbol)
             if articles:

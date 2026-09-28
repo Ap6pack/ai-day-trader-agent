@@ -25,6 +25,7 @@ you ──► Claude Code ──► Robinhood MCP tools (quotes, indicators, acc
              │               ▲
              │               └── .claude/hooks/order_guard.sh ─► trader.guard
              │                   (runs before every order; fails closed)
+             ├──► python -m trader.scan    (candidates: Alpaca movers + Jev triage)
              ├──► python -m trader.news    (Jev headline judgments)
              ├──► python -m trader.sizing  (quantity and stop from account figures)
              └──► python -m trader.journal (decisions, outcomes, hit rate)
@@ -87,6 +88,7 @@ anything that can place an order.
 | Command | Purpose |
 |---|---|
 | `python -m trader.status` | Mode, limits, credential status |
+| `python -m trader.scan [--all]` | Today's candidates: watchlist + Alpaca most-active and movers, ranked with Jev (material news first) |
 | `python -m trader.news SYMBOL [--json] [--sample]` | Jev judgments of recent headlines |
 | `python -m trader.sizing --symbol S --side buy --price P --equity E [...]` | Max quantity and stop-loss |
 | `python -m trader.journal decide ...` / `list` / `events` / `pending` / `outcome` / `summary` | Journal |

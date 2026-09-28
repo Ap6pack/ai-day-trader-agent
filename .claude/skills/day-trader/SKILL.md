@@ -11,6 +11,7 @@ data and order entry. This project adds three things Robinhood does not:
 | Command | What it does |
 |---|---|
 | `python -m trader.status` | Mode (`review` or `live`), hard limits, credential status. Never read `.env` directly. |
+| `python -m trader.scan` | Today's candidates: the user's watchlist plus Alpaca's most-active stocks and movers, ranked with Jev (fresh material news first). |
 | `python -m trader.news SYMBOL --json` | Jev's judgment of each recent headline: relevance, direction, materiality, event type, plus a weighted score. |
 | `python -m trader.sizing ...` | Largest quantity that fits the percentage limits, and a suggested stop-loss. |
 | `python -m trader.journal ...` | Records every decision with its reasoning; scores it later. |
@@ -46,8 +47,10 @@ if `python` is not the venv's).
    first (step 6).
 
 ### 2. Build the candidate list
-Use what the user names. Otherwise: their Robinhood watchlists (`get_watchlists`,
-`get_watchlist_items`) or saved scans (`get_scans`, `run_scan`). Check
+Use what the user names. Otherwise run `python -m trader.scan` and work down its shortlist
+(`material_news: true` means Jev found a relevant, material headline in the last 24 hours).
+Robinhood watchlists (`get_watchlists`, `get_watchlist_items`) and saved scans
+(`get_scans`, `run_scan`) are other sources if the user has them. Check
 `get_earnings_calendar` for today: earnings names move on news, not on technicals.
 
 ### 3. Analyze one symbol

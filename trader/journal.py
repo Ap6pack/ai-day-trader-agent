@@ -113,14 +113,24 @@ class Journal:
 
     def orders_allowed_today(self, now: Optional[datetime] = None) -> int:
         """Orders the guard let through since midnight US/Eastern."""
+        return self.count_events_today("order_allowed", now=now)
+
+    def count_events_today(self, kind: str, now: Optional[datetime] = None) -> int:
+        """Events of this kind since midnight US/Eastern."""
         now = now or _now()
         local_midnight = now.astimezone(MARKET_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT COUNT(*) FROM events WHERE kind = 'order_allowed' AND ts >= ?",
-                (_iso(local_midnight),),
+                "SELECT COUNT(*) FROM events WHERE kind = ? AND ts >= ?", (kind, _iso(local_midnight)),
             ).fetchone()
         return int(row[0])
+
+    def last_event_for_symbol(self, kind: str, symbol: str) -> Optional[sqlite3.Row]:
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT * FROM events WHERE kind = ? AND symbol = ? ORDER BY ts DESC LIMIT 1",
+                (kind, symbol.upper()),
+            ).fetchone()
 
     def latest_review(
         self, symbol: str, side: str, within_minutes: int, now: Optional[datetime] = None

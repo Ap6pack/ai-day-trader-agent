@@ -188,6 +188,9 @@ def _judge_article(client, questions, symbol: str, article: Dict[str, Any]) -> O
         # Rescale the 0..4 direction rubric to -1..1.
         "direction": (direction.score - 2.0) / 2.0,
         "direction_confidence": direction.confidence,
+        # Probability mass on the bearish (0, 1) and bullish (3, 4) direction levels.
+        "p_bearish": round(sum(direction.probabilities.get(level, 0.0) for level in (0, 1)), 4),
+        "p_bullish": round(sum(direction.probabilities.get(level, 0.0) for level in (3, 4)), 4),
         # Rescale the 0..3 materiality rubric to 0..1.
         "materiality": materiality.score / 3.0,
         "event_type": event.choice,
@@ -260,18 +263,21 @@ def aggregate_judgments(judgments: List[Dict[str, Any]], now: Optional[datetime]
 
 
 def analyze_news(
-    symbol: str, articles: List[Dict[str, Any]], now: Optional[datetime] = None
+    symbol: str,
+    articles: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+    max_articles: int = MAX_ARTICLES,
 ) -> Dict[str, Any]:
     """
     Judge each article with Jev and aggregate into a sentiment result.
 
-    Returns the same {category, score, rationale} shape as the OpenAI
-    sentiment analyzer, plus per-article judgments and evidence weight.
-    Raises if the TypeSafe client cannot be created.
+    Returns {category, score, rationale, evidence_weight, articles}, where
+    articles holds the per-article judgments. Raises if the TypeSafe client
+    cannot be created.
     """
     client = _get_client()
     questions = _build_questions()
-    articles = [a for a in articles if a.get("title")][:MAX_ARTICLES]
+    articles = [a for a in articles if a.get("title")][:max_articles]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         results = list(pool.map(lambda a: _judge_article(client, questions, symbol, a), articles))
@@ -283,6 +289,11 @@ def analyze_news(
     result = aggregate_judgments([dict(j) for j in judgments], now=now)
     result["provider"] = "typesafe"
     return result
+
+
+def judge_headline(symbol: str, article: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Judge a single article (one Jev request, cached). Returns None if Jev fails."""
+    return _judge_article(_get_client(), _build_questions(), symbol, article)
 
 
 def clear_cache() -> None:
