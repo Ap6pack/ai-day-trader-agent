@@ -9,12 +9,26 @@ trading signals based on market sentiment.
 import openai
 import json
 from config import settings
+from utils.logger import get_logger
 
-def analyze_sentiment(articles):
+def analyze_sentiment(articles, symbol=None):
     """
-    Analyze sentiment of news articles using OpenAI.
+    Analyze sentiment of news articles.
+    Uses TypeSafe Jev per-article judgments when TYPESAFE_API_KEY and a symbol
+    are available, falling back to OpenAI otherwise.
     Returns a dict: {category, score, rationale}
     """
+    if symbol:
+        from core import jev_news_analyzer
+
+        if jev_news_analyzer.is_configured():
+            try:
+                return jev_news_analyzer.analyze_news(symbol, articles)
+            except Exception as e:
+                get_logger("sentiment_analyzer").warning(
+                    f"Jev news analysis failed, falling back to OpenAI: {e}"
+                )
+
     openai.api_key = settings.OPENAI_API_KEY
     prompt = (
         "You are a financial sentiment analysis model. "

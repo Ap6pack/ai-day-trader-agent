@@ -1,10 +1,11 @@
 # Core dependencies (pinned for reproducibility)
 python-dotenv==1.0.1
 requests==2.32.3
-pandas==2.2.3
-numpy==2.1.3
+pandas==2.3.3
+numpy==2.3.5
 ta==0.11.0
 openai==1.58.1
+typesafe-sdk==0.7.2
 yfinance==0.2.49
 
 # Discord bot
@@ -13,11 +14,11 @@ discord.py==2.5.2
 # Database (SQLite3 is included with Python)
 
 # Machine Learning
-scikit-learn==1.6.0
+scikit-learn==1.7.2
 joblib==1.4.2
 
 # Data visualization (for backtesting)
-matplotlib==3.10.0
+matplotlib==3.10.7
 seaborn==0.13.2
 
 # Additional utilities
@@ -27,7 +28,7 @@ pytz==2025.1
 # API Server dependencies (updated to latest stable versions)
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-pydantic==2.10.5
+pydantic==2.13.5
 pydantic-settings==2.7.1
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4

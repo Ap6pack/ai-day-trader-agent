@@ -319,7 +319,7 @@ class EnhancedTradingPipeline:
                     "overall_sentiment": 0
                 }
             else:
-                sentiment_result = analyze_sentiment(articles)
+                sentiment_result = analyze_sentiment(articles, symbol)
                 sentiment_result['overall_sentiment'] = sentiment_result.get('score', 0)
             
             # Convert sentiment to trading signal
@@ -340,6 +340,8 @@ class EnhancedTradingPipeline:
                 'strength': strength,
                 'priority': SignalPriority.SENTIMENT_BASED,
                 'sentiment_score': sentiment_score,
+                'sentiment_provider': sentiment_result.get('provider', 'openai'),
+                'rationale': sentiment_result.get('rationale'),
                 'reason': f"Sentiment score: {sentiment_score:.2f}"
             }
             
