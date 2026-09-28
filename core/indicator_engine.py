@@ -2,15 +2,50 @@
 import pandas as pd
 import ta
 
+CANDLE_FIELDS = ("open", "high", "low", "close", "volume", "datetime")
+
+
+def sort_candlesticks(candlesticks):
+    """
+    Return a copy of column-oriented candlesticks in chronological (oldest-first) order.
+
+    Providers disagree on order: Alpaca (sort=desc), Yahoo Finance and Twelve Data
+    all return newest-first, while every indicator reads ``iloc[-1]`` as the latest
+    bar. Rows are sorted by ``datetime`` when every timestamp parses; otherwise the
+    input order is kept unchanged.
+    """
+    datetimes = candlesticks.get("datetime")
+    if not datetimes or len(datetimes) < 2:
+        return dict(candlesticks)
+    if any(len(candlesticks.get(f, [])) != len(datetimes) for f in CANDLE_FIELDS if f in candlesticks):
+        return dict(candlesticks)
+
+    # utc=True accepts both naive ("2026-01-02 15:00:00") and aware ("...Z") stamps.
+    parsed = pd.to_datetime(pd.Series(datetimes), errors="coerce", utc=True)
+    if parsed.isna().any():
+        return dict(candlesticks)
+
+    order = parsed.sort_values(kind="stable").index.tolist()
+    if order == list(range(len(order))):
+        return dict(candlesticks)
+    return {
+        field: ([values[i] for i in order] if field in CANDLE_FIELDS else values)
+        for field, values in candlesticks.items()
+    }
+
+
 def compute_indicators(market_data):
     """
     Compute technical indicators (RSI, MACD, SMA, EMA) from market data.
-    market_data: {'candlesticks': {'open': [...], 'high': [...], 'low': [...], 'close': [...], 'volume': [...]}}
-    Returns: {indicator_name: value, ...}
+    market_data: {'candlesticks': {'open': [...], 'high': [...], 'low': [...], 'close': [...],
+                                   'volume': [...], 'datetime': [...]}}
+    Candles are sorted by ``datetime`` when present, so provider order does not matter;
+    without datetimes the lists must already be oldest-first.
+    Returns: {indicator_name: value, ...} computed at the most recent bar.
     """
     # Handle the new format from the pipeline
     if 'candlesticks' in market_data:
-        candlesticks = market_data['candlesticks']
+        candlesticks = sort_candlesticks(market_data['candlesticks'])
         
         # Create DataFrame from the candlesticks data
         df = pd.DataFrame({
@@ -25,9 +60,6 @@ def compute_indicators(market_data):
         for col in ["open", "high", "low", "close", "volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        
-        # Sort by index (oldest first) - no datetime column needed
-        df = df.sort_index()
         
         # Compute indicators
         result = {}

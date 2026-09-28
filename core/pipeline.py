@@ -21,7 +21,7 @@ from core.dividend_provider_config import (
     active_dividend_providers,
     dividend_strategy_enabled,
 )
-from core.indicator_engine import compute_indicators
+from core.indicator_engine import compute_indicators, sort_candlesticks
 from core.portfolio_manager_provider import get_portfolio_manager
 from core.sentiment_analyzer import analyze_sentiment
 from core.news_fetcher import get_news_articles
@@ -155,9 +155,10 @@ class EnhancedTradingPipeline:
                                     except (ValueError, TypeError):
                                         continue  # Skip invalid data
                             
-                            # Only return if we have at least some data
+                            # Only return if we have at least some data. Providers
+                            # return newest-first; analysis expects oldest-first.
                             if len(candlesticks['close']) > 0:
-                                return {'candlesticks': candlesticks}
+                                return {'candlesticks': sort_candlesticks(candlesticks)}
         
         # Fallback: return empty structure with at least one dummy data point to prevent index errors
         return {
@@ -696,6 +697,7 @@ class EnhancedTradingPipeline:
         # Add datetime index if available
         if 'datetime' in candlesticks:
             df.index = pd.to_datetime(candlesticks['datetime'])
+            df = df.sort_index(kind='stable')
         
         return df
     
