@@ -112,6 +112,13 @@ def get_news_articles(symbol):
             articles = get_alpaca_news(symbol)
             if articles:
                 return articles
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            hint = ""
+            if status in (401, 403):
+                hint = (" Alpaca rejected the credentials: ALPACA_API_KEY and ALPACA_SECRET_KEY must be "
+                        "a Trading API key pair generated together (paper keys usually start with PK).")
+            logger.warning(f"Alpaca news request failed for {symbol} (HTTP {status}), falling back to NewsAPI.{hint}")
         except Exception as e:
             logger.warning(f"Alpaca news request failed for {symbol}, falling back to NewsAPI: {e}")
     else:
