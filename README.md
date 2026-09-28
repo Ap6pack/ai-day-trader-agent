@@ -170,7 +170,11 @@ Then each agent opts in on its own:
   `run` refuses to start.
 - **Desk ticket**: the desk shows a red **LIVE MONEY** badge, and every order must be
   confirmed by typing `LIVE`.
-- **Desk autopilot**: stays paper. Its paper mode refuses to start on a live account.
+- **Desk autopilot**: the AUTOPILOT tab offers *Send LIVE orders — REAL MONEY* instead
+  of paper orders, and starting it needs you to type `LIVE`. It sizes on the live
+  account's equity, caps each buy at `ALPACA_LIVE_MAX_ORDER_USD`, only sells shares it
+  bought itself, and closes its own positions `AUTOPILOT_FLATTEN_MINUTES` before the
+  close (as it now does in paper mode too).
 
 Hard limits on every live buy, checked in `trader.alpaca` at the moment of sending, so
 no agent can skip them: `ALPACA_LIVE_MAX_ORDER_USD` (default $500 per order),
@@ -178,9 +182,9 @@ no agent can skip them: `ALPACA_LIVE_MAX_ORDER_USD` (default $500 per order),
 (default $200; new buys stop for the day once the account is down that much). Sells
 are never blocked, so you can always get out.
 
-Your own holdings are safe: on a live account the news bot only sells and flattens
-shares it bought that day (tracked by its order ids), never positions you already
-hold, and "close every position" is paper only.
+Your own holdings are safe: on a live account the news bot and the autopilot only sell
+and flatten shares they bought that day (tracked by their order ids), never positions
+you already hold, and "close every position" is paper only.
 
 Start small, watch the desk, and run `python -m trader.newsbot replay SYMBOL` on recent
 headlines first. Robinhood real-money trading is separate: it goes through Claude Code

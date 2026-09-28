@@ -28,7 +28,7 @@
     order_submitted: 'ORDER', order_failed: 'REJ', order_cancelled: 'CXL', order_skipped: 'SKIP',
     flatten: 'FLAT', guard: 'GUARD',
   };
-  const MODE_LABEL = { signals: 'SIGNALS ONLY', record: 'LOCAL PORTFOLIO', paper: 'ALPACA PAPER ORDERS' };
+  const MODE_LABEL = { signals: 'SIGNALS ONLY', record: 'LOCAL PORTFOLIO', paper: 'ALPACA PAPER ORDERS', live: 'LIVE ORDERS · REAL MONEY' };
 
   // An event's call for the signal panel: a full analysis (autopilot / ANALYZE)
   // or the news bot's headline call. Returns null when the event carries neither.
@@ -169,6 +169,9 @@
     const acctLabel = isLive() ? 'ALPACA LIVE' : 'ALPACA PAPER';
     $('blotter-sub').textContent = acctLabel;
     $('pos-src').options[0].textContent = acctLabel;
+    // The autopilot's broker mode must match the account: offer paper or live, not both.
+    const brokerOpt = $('pilot-mode').querySelector('option[value="paper"]');
+    if (isLive() && brokerOpt) { brokerOpt.value = 'live'; brokerOpt.textContent = 'Send LIVE orders — REAL MONEY'; }
     updateTicketMode();
     if (!S.config.timeframes.includes(S.tf)) S.tf = S.config.default_timeframe;
 
@@ -849,7 +852,7 @@
       sel.innerHTML = (first || '') + S.portfolios.map((n) => `<option value="${esc(n)}">${esc(first ? n.toUpperCase() : n)}</option>`).join('');
       if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
     };
-    opts($('pos-src'), '<option value="alpaca">ALPACA PAPER</option>');
+    opts($('pos-src'), `<option value="alpaca">${isLive() ? 'ALPACA LIVE' : 'ALPACA PAPER'}</option>`);
     $('pos-src').value = S.posSource;
     const dest = $('tk-dest'), cur = dest.value;
     dest.innerHTML = `<option value="alpaca">${isLive() ? 'Alpaca LIVE account (real money)' : 'Alpaca paper account'}</option>`
@@ -1023,7 +1026,8 @@
     S.autopilot = status || null;
     const running = !!status?.running;
     $('auto-badge').hidden = !running;
-    $('pilot-state').innerHTML = running ? `<span class="up">RUNNING · ${esc(status.config.mode.toUpperCase())}</span>` : 'OFF';
+    $('pilot-state').innerHTML = !running ? 'OFF'
+      : `<span class="${status.config.mode === 'live' ? 'down' : 'up'}">RUNNING · ${esc(status.config.mode.toUpperCase())}</span>`;
     const btn = $('pilot-toggle');
     btn.textContent = running ? 'STOP AUTOPILOT' : 'START AUTOPILOT';
     btn.className = `btn wide ${running ? 'btn-stop' : 'btn-amber'}`;
@@ -1066,11 +1070,21 @@
         .map((x) => x.trim().toUpperCase()).filter(Boolean);
       const mode = $('pilot-mode').value;
       if (mode === 'paper' && !confirm(`Autopilot will SEND ALPACA PAPER ORDERS for ${symbols.length} symbols on its own. Continue?`)) return;
+      if (mode === 'live') {
+        const lim = S.config.live_limits || {};
+        const typed = prompt(`REAL MONEY: the autopilot will buy and sell ${symbols.join(', ')} on your LIVE Alpaca account `
+          + `on its own, with no approval per trade.\n`
+          + `Limits: ${money(lim.max_order_usd)} per buy · ${lim.max_orders_per_day ?? '—'} buys/day · `
+          + `buys stop after a ${money(lim.max_daily_loss_usd)} day loss. It only sells shares it bought, `
+          + `and closes them before the market close.\n\nType LIVE to start.`);
+        if ((typed || '').trim().toUpperCase() !== 'LIVE') { toast('Autopilot not started'); return; }
+      }
       setAutopilot(await API.startAutopilot({
         symbols,
         interval_seconds: parseInt($('pilot-interval').value, 10),
         mode,
         portfolio: $('pilot-portfolio').value || 'default',
+        confirm_live: mode === 'live',
       }));
     } catch (err) {
       toast(`Autopilot: ${err.message}`, 5000);

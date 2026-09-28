@@ -27,13 +27,29 @@ def decision(symbol="NVDA", rec="BUY", qty=5, conf=0.7, price=100.0):
 
 
 class Broker:
-    def __init__(self, clock=OPEN):
+    def __init__(self, clock=OPEN, mode="paper"):
         self.clock = clock
         self.orders = []
-        self.paper = True
+        self.mode = mode
+        self.owned = {}
+        self.max_live = 1000
+        self.flattened = 0
 
-    def is_paper(self):
-        return self.paper
+    def require_mode(self, expected, who="x"):
+        if self.mode != expected:
+            raise alpaca.AccountError(f"{who} is set to trade {expected.upper()} but the account is {self.mode.upper()}")
+
+    def owned_qty(self, prefix, symbol):
+        assert prefix == "autopilot-"
+        return self.owned.get(symbol, 0.0)
+
+    def max_live_qty(self, price):
+        return self.max_live
+
+    def flatten_owned(self, prefix):
+        assert prefix == "autopilot-"
+        self.flattened += 1
+        return [{"symbol": s} for s in self.owned]
 
     def market_clock(self):
         return self.clock
@@ -73,7 +89,8 @@ def setup(tmp_path):
 
 def test_config_validation():
     assert RunConfig(["nvda", " amd "], 300, "paper").validate().symbols == ["NVDA", "AMD"]
-    for bad in (RunConfig([], 300), RunConfig(["NVDA"], 30), RunConfig(["NVDA"], 300, "live"),
+    assert RunConfig(["NVDA"], 300, "live").validate().mode == "live"
+    for bad in (RunConfig([], 300), RunConfig(["NVDA"], 30), RunConfig(["NVDA"], 300, "real"),
                 RunConfig(["NV DA1"], 300)):
         with pytest.raises(ValueError):
             bad.validate()
@@ -176,9 +193,12 @@ def test_start_stop_and_paper_guard(setup):
         await asyncio.sleep(0.05)
         status = await trader.stop()
         assert not status["running"] and status["cycles"] >= 1
-        broker.paper = False
-        with pytest.raises(ValueError, match="paper host"):
+        broker.mode = "live"
+        with pytest.raises(ValueError, match="set to trade PAPER"):
             await trader.start(RunConfig(["NVDA"], 60, "paper"))
+        broker.mode = "paper"
+        with pytest.raises(ValueError, match="set to trade LIVE"):
+            await trader.start(RunConfig(["NVDA"], 60, "live"))
         with pytest.raises(Exception):
             await trader.start(RunConfig(["NVDA"], 60, "record", "missing"))
         assert not trader.running
@@ -186,3 +206,47 @@ def test_start_stop_and_paper_guard(setup):
     asyncio.run(run())
     messages = [e["message"] for e in events if e["type"] == "autopilot"]
     assert messages[0].startswith("Autopilot ON") and "Autopilot OFF" in messages
+
+
+# --- live (real money) ------------------------------------------------------------------
+
+
+def test_live_mode_sizes_on_live_equity_and_only_its_own_shares(setup):
+    trader, journal, portfolios, broker, events, results, calls = setup
+    broker.mode = "live"
+    broker.owned = {"AMD": 2.0}  # the account also holds 3 AMD of your own (Broker.positions)
+    results["AMD"] = decision("AMD", rec="SELL", qty=2)
+    trader.run_cycle(RunConfig(["NVDA", "AMD"], 300, "live"))
+    assert calls[0][1] == 20000 and calls[0][3] == "alpaca LIVE equity"
+    assert calls[1][2] == 2.0  # held = autopilot-owned shares, not the account's 3
+    buy, sell = broker.orders
+    assert buy["order_class"] == "bracket" and sell["side"] == "sell" and sell["qty"] == "2"
+    assert all(o["client_order_id"].startswith("autopilot-") for o in broker.orders)
+    details = [e["detail"] for e in journal.events(10) if e["kind"] == ORDER_EVENT]
+    assert all(d.startswith("LIVE ") for d in details)
+
+
+def test_live_buy_is_capped_by_the_live_order_limit(setup):
+    trader, journal, portfolios, broker, events, results, calls = setup
+    broker.mode, broker.max_live = "live", 2
+    trader.run_cycle(RunConfig(["NVDA"], 300, "live"))
+    assert broker.orders[0]["qty"] == "2"  # analysis said 5
+    broker.max_live = 0
+    trader.limits = Limits(cooldown_minutes=0)
+    [outcome] = trader.run_cycle(RunConfig(["NVDA"], 300, "live"))
+    assert outcome["action"] == "none" and "ALPACA_LIVE_MAX_ORDER_USD" in outcome["reason"]
+    assert len(broker.orders) == 1
+
+
+def test_pre_close_flatten_runs_once_for_broker_modes_only(setup):
+    trader, journal, portfolios, broker, events, results, calls = setup
+    broker.clock = {"is_open": True, "next_close": "2026-09-28T11:08:00-04:00"}  # 8 min away
+    assert trader.maybe_flatten(RunConfig(["NVDA"], 300, "record")) is None
+    broker.owned = {"NVDA": 5.0}
+    assert trader.maybe_flatten(RunConfig(["NVDA"], 300, "live")) == 1
+    assert trader.maybe_flatten(RunConfig(["NVDA"], 300, "live")) is None  # once per session
+    assert broker.flattened == 1
+    assert any(e["type"] == "flatten" for e in events)
+    early = Broker(clock={"is_open": True, "next_close": "2026-09-28T16:00:00-04:00"})
+    trader.broker = early
+    assert trader.maybe_flatten(RunConfig(["NVDA"], 300, "paper")) is None and early.flattened == 0

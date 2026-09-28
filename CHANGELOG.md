@@ -14,8 +14,10 @@ All notable changes to this project will be documented in this file.
   pass. `NEWSBOT_EXECUTION=live` lets the news bot trade it (the mode must match the
   account); on live it flattens only the shares it bought (`flatten_owned`), and
   `close_all_positions` is paper only. The desk shows the live account with a LIVE
-  MONEY badge and requires typing LIVE for each ticket order. The desk autopilot stays
-  paper only.
+  MONEY badge and requires typing LIVE for each ticket order. The desk autopilot has a
+  `live` mode (typing LIVE to start): it sizes on live equity, caps buys at the live
+  per-order limit and only sells shares it bought. In paper and live modes it now
+  closes its own positions `AUTOPILOT_FLATTEN_MINUTES` before the close.
 - Features from the original desk (PR #5), rebuilt on the new app:
   - `trader.analysis`: the multi-strategy analysis. `trader.technicals` (RSI, MACD,
     SMA/EMA, ATR) gives the technical signal with the original rules, Jev's headline

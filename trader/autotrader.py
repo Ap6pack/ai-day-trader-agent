@@ -7,11 +7,17 @@ Modes:
   record   trade a local paper portfolio (trader.portfolios) at the live price
   paper    send Alpaca paper orders: bracket buys at the analysis's stop/target,
            market sells of a held position
+  live     the same orders with REAL MONEY on the Alpaca live account (needs
+           ALPACA_LIVE_TRADING=true and the live host; the desk asks you to type LIVE)
 
 Hard limits, checked before every trade (AUTOPILOT_* in .env): minimum confidence,
 daily trade cap, per-symbol cooldown, minimum price, market open and no new buys
 within the entry cutoff before the close. Long only: SELL reduces a held position.
-Paper orders go only to Alpaca's paper host (trader.alpaca refuses anything else).
+The mode must match the configured Alpaca account (trader.alpaca.require_mode).
+In paper and live modes the autopilot closes the positions it opened
+AUTOPILOT_FLATTEN_MINUTES before the close (bracket legs are day orders). On the
+live account it only ever sells shares it bought itself, never your holdings,
+and every buy also passes the ALPACA_LIVE_* limits in trader.alpaca.
 """
 
 from __future__ import annotations
@@ -31,7 +37,10 @@ from trader.portfolios import Portfolios
 
 logger = logging.getLogger("trader.autotrader")
 
-MODES = ("signals", "record", "paper")
+MODES = ("signals", "record", "paper", "live")
+BROKER_MODES = ("paper", "live")
+ORDER_PREFIX = "autopilot-"
+FLATTEN_CHECK_SECONDS = 30
 MIN_INTERVAL, MAX_INTERVAL = 60, 3600
 ORDER_EVENT = "autopilot_order"
 THESIS_PREFIX = "[autopilot]"
@@ -51,6 +60,7 @@ class Limits:
     cooldown_minutes: int = 30
     min_price: float = 5.0
     entry_cutoff_minutes: int = 15
+    flatten_minutes: int = 10
 
     @classmethod
     def from_env(cls) -> "Limits":
@@ -60,6 +70,7 @@ class Limits:
             cooldown_minutes=int(_env("AUTOPILOT_COOLDOWN_MINUTES", 30)),
             min_price=_env("AUTOPILOT_MIN_PRICE", 5.0),
             entry_cutoff_minutes=int(_env("AUTOPILOT_ENTRY_CUTOFF_MINUTES", 15)),
+            flatten_minutes=int(_env("AUTOPILOT_FLATTEN_MINUTES", 10)),
         )
 
 
@@ -121,6 +132,7 @@ class AutoTrader:
         self.last_error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
         self._trade_lock = threading.Lock()
+        self._flattened_for: Optional[str] = None
 
     # --- status / control ---------------------------------------------------------
 
@@ -145,8 +157,11 @@ class AutoTrader:
         if config.mode == "record":
             self.portfolios.ensure_default()
             self.portfolios.get(config.portfolio)  # raises if missing
-        if config.mode == "paper" and not self.broker.is_paper():
-            raise ValueError("Paper mode needs ALPACA_TRADING_BASE_URL on the Alpaca paper host")
+        if config.mode in BROKER_MODES:
+            try:
+                self.broker.require_mode(config.mode, who=f"Autopilot {config.mode} mode")
+            except Exception as exc:
+                raise ValueError(str(exc)) from exc
         await self.stop(announce=False)
         self.limits = Limits.from_env()
         self.config, self.cycles, self.last_error = config, 0, None
@@ -184,8 +199,35 @@ class AutoTrader:
             self.next_cycle_at = (self.now() + timedelta(seconds=config.interval_seconds)).isoformat()
             self._event("autopilot", None, "system",
                         f"Autopilot cycle {self.cycles} complete; next in {config.interval_seconds}s")
-            await asyncio.sleep(config.interval_seconds)
+            waited = 0
+            while waited < config.interval_seconds:  # short naps so the pre-close flatten is not missed
+                step = min(FLATTEN_CHECK_SECONDS, config.interval_seconds - waited)
+                await asyncio.sleep(step)
+                waited += step
+                await asyncio.to_thread(self.maybe_flatten, config)
             self.next_cycle_at = None
+
+    def maybe_flatten(self, config: RunConfig) -> Optional[int]:
+        """Close the autopilot's own positions once per session, flatten_minutes before the close."""
+        if config.mode not in BROKER_MODES:
+            return None
+        try:
+            clock = self.broker.market_clock()
+            next_close = _parse(clock.get("next_close"))
+            if (not clock.get("is_open") or next_close is None or clock["next_close"] == self._flattened_for
+                    or next_close - self.now() > timedelta(minutes=self.limits.flatten_minutes)):
+                return None
+            with self._trade_lock:
+                closed = self.broker.flatten_owned(ORDER_PREFIX)
+                self._flattened_for = clock["next_close"]
+        except Exception as exc:
+            self._event("order_failed", None, "error", f"Autopilot pre-close flatten failed: {exc}")
+            return None
+        detail = f"closed {len(closed)} autopilot positions before the {clock['next_close']} close"
+        self.journal.log_event("flatten", tool="autopilot", detail=detail, payload={"mode": config.mode},
+                               now=self.now())
+        self._event("flatten", None, "system", f"AUTO {detail}")
+        return len(closed)
 
     # --- one cycle --------------------------------------------------------------------
 
@@ -198,6 +240,11 @@ class AutoTrader:
         })
 
     def _capital_and_held(self, config: RunConfig, symbol: str) -> "tuple[float, float, str]":
+        if config.mode == "live":
+            # Only shares the autopilot bought itself count as held: it never sells your holdings.
+            account = self.broker.account()
+            return float(account.get("equity") or 0), self.broker.owned_qty(ORDER_PREFIX, symbol), \
+                "alpaca LIVE equity"
         if config.mode == "paper":
             account = self.broker.account()
             held = next((float(p.get("qty") or 0) for p in self.broker.positions()
@@ -280,6 +327,13 @@ class AutoTrader:
                     self._event("order_skipped", symbol, "warning", f"{symbol}: {rec} not placed - {blocked}")
                 return {"symbol": symbol, "action": "none", "reason": blocked}
             qty, price = result["quantity"], result["current_price"]
+            if config.mode == "live" and rec == "BUY":
+                qty = min(qty, self.broker.max_live_qty(price))
+                if qty < 1:
+                    reason = f"one share at ${price:.2f} exceeds ALPACA_LIVE_MAX_ORDER_USD"
+                    self._event("order_skipped", symbol, "warning", f"{symbol}: {rec} not placed - {reason}")
+                    return {"symbol": symbol, "action": "none", "reason": reason}
+                result = {**result, "quantity": qty}
             try:
                 if config.mode == "record":
                     fill = self.portfolios.record_fill(config.portfolio, symbol, rec.lower(), qty, price,
@@ -288,7 +342,8 @@ class AutoTrader:
                 else:
                     payload = self._paper_order(result)
                     order = self.broker.submit_order(payload)
-                    detail = f"paper {rec} {qty} {symbol} order {str(order.get('id', ''))[:8]}"
+                    label = "LIVE" if config.mode == "live" else "paper"
+                    detail = f"{label} {rec} {qty} {symbol} order {str(order.get('id', ''))[:8]}"
                     payload = {"request": payload, "order_id": order.get("id"), "status": order.get("status")}
             except Exception as exc:
                 self._event("order_failed", symbol, "error", f"{symbol}: {rec} {qty} failed - {exc}")
@@ -313,5 +368,5 @@ class AutoTrader:
             tp_pct = (target / price - 1) * 100 if target and target > price else 2.0
             payload = self.broker.bracket_order_payload(symbol, qty, price, tp_pct, sl_pct)
         # Tagged so the desk's blotter can tell autopilot orders from the news bot's and manual ones.
-        payload["client_order_id"] = f"autopilot-{uuid.uuid4()}"
+        payload["client_order_id"] = f"{ORDER_PREFIX}{uuid.uuid4()}"
         return payload

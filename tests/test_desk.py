@@ -326,8 +326,8 @@ def test_autopilot_start_status_stop(env, journal, monkeypatch):
     with client_for(journal) as c:
         bad = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 10, "mode": "signals"})
         assert bad.status_code == 422
-        live = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60, "mode": "live"})
-        assert live.status_code == 422
+        unknown = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60, "mode": "real"})
+        assert unknown.status_code == 422
         missing = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60,
                                                       "mode": "record", "portfolio": "nope"})
         assert missing.status_code == 400
@@ -390,3 +390,19 @@ def test_live_account_orders_need_explicit_confirmation(env, journal, monkeypatc
         # The autopilot's broker modes stay paper: it refuses to start on a live account.
         refused = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60, "mode": "paper"})
         assert refused.status_code == 400
+
+
+def test_live_autopilot_needs_confirmation(env, journal, monkeypatch):
+    env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    env.setenv("ALPACA_LIVE_TRADING", "true")
+    monkeypatch.setattr(desk.analysis, "analyze", lambda *a, **k: fake_analysis(rec="HOLD", qty=0))
+    body = {"symbols": ["NVDA"], "interval_seconds": 300, "mode": "live"}
+    with client_for(journal) as c:
+        refused = c.post("/api/desk/autopilot", json=body)
+        assert refused.status_code == 400 and "REAL MONEY" in refused.json()["detail"]
+        started = c.post("/api/desk/autopilot", json={**body, "confirm_live": True}).json()
+        assert started["running"] and started["config"]["mode"] == "live"
+        assert c.delete("/api/desk/autopilot").json()["running"] is False
+    env.delenv("ALPACA_LIVE_TRADING")
+    with client_for(journal) as c:  # without the opt-in the account is unusable: live refuses
+        assert c.post("/api/desk/autopilot", json={**body, "confirm_live": True}).status_code == 400

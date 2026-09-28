@@ -14,7 +14,8 @@ What it shows, live over /ws/desk:
 ANALYZE runs the multi-strategy analysis (technical + Jev sentiment + dividend) with
 sizing, stop/target and risk. JUDGE runs Jev on a symbol's recent headlines with the
 news bot's own rules. The AUTOPILOT panel starts and stops the desk autopilot
-(trader.autotrader: signals, record to a local portfolio, or Alpaca paper orders),
+(trader.autotrader: signals, record to a local portfolio, Alpaca paper orders, or
+live orders on an opted-in live account, which must be confirmed by typing LIVE),
 and the NEWS BOT tab pauses or resumes the news bot's trading. Local paper
 portfolios (trader.portfolios) can be created, viewed and traded from the desk.
 The manual ticket sends Alpaca market orders or records a fill in a local
@@ -538,8 +539,10 @@ class PortfolioRequest(BaseModel):
 class AutopilotRequest(BaseModel):
     symbols: List[str] = Field(min_length=1, max_length=40)
     interval_seconds: int = Field(ge=autotrader.MIN_INTERVAL, le=autotrader.MAX_INTERVAL)
-    mode: str = Field(pattern="^(signals|record|paper)$")
+    mode: str = Field(pattern="^(signals|record|paper|live)$")
     portfolio: str = Field(default="default", max_length=40)
+    # Must be true to start the autopilot in live (real money) mode.
+    confirm_live: bool = False
 
 
 class PauseRequest(BaseModel):
@@ -682,6 +685,8 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
 
     @app.post("/api/desk/autopilot", dependencies=auth)
     async def autopilot_start(req: AutopilotRequest):
+        if req.mode == "live" and not req.confirm_live:
+            raise HTTPException(400, "Live mode trades REAL MONEY on its own: confirm to start it")
         try:
             status = await pilot.start(autotrader.RunConfig(req.symbols, req.interval_seconds, req.mode, req.portfolio))
         except (ValueError, PortfolioError) as exc:
