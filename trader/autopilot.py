@@ -48,12 +48,19 @@ ROBINHOOD_READ_TOOLS = (
     "get_earnings_results",
     "review_equity_order",
 )
-TRADER_COMMANDS = (
-    "Bash(python -m trader.status)",
-    "Bash(python -m trader.news *)",
-    "Bash(python -m trader.sizing *)",
-    "Bash(python -m trader.journal *)",
+# Both interpreter spellings are allowed; claude_env() puts .venv/bin first on PATH.
+PYTHONS = ("python", ".venv/bin/python")
+TRADER_COMMANDS = tuple(
+    f"Bash({py} -m {command})"
+    for py in PYTHONS
+    for command in ("trader.status", "trader.news *", "trader.sizing *", "trader.journal *")
 )
+
+# Allowlist rules match one plain command at a time, so a chained or wrapped command
+# (`source ... && python -m ...`) is denied in dontAsk mode.
+COMMAND_RULES = """Run each project command on its own, exactly as `python -m trader.<module> ...`: no `source`,
+no virtualenv activation, no `cd`, and no `&&`, `;` or pipes. The project's virtualenv is already
+first on PATH. Any other command form is denied in this unattended run."""
 
 
 def robinhood_server() -> str:
@@ -113,6 +120,7 @@ def run_prompt(shortlist: List[Dict[str, Any]], mode: str, account: Optional[str
 
 Autopilot run at {now.astimezone(MARKET_TZ):%Y-%m-%d %H:%M} ET. Nobody is watching this session: do not
 ask questions. Anything that needs the user goes in the report.
+{COMMAND_RULES}
 Mode: {mode}. {account_line}
 Never call a place_*_order or exercise tool in an autopilot run, whatever the mode.
 
@@ -121,24 +129,25 @@ headline from the last 24 hours; percent_change is today's move.
 {json.dumps(shortlist, indent=2)}
 
 For each symbol in order, follow playbook steps 3 to 5 (analyze, decide, size, review, journal).
-Journal every decision, passes included, with `python -m trader.journal decide`. Use `python`, not
-another interpreter path. Skip a symbol if its data is unavailable and say why.
+Journal every decision, passes included, with `python -m trader.journal decide`. Skip a symbol if its data is unavailable and say why.
 
 Finish with a short Markdown report: a table of symbol, action, entry, stop, target, confidence and a
 one-line thesis, then anything the user should look at."""
 
 
-SCORE_PROMPT = """/day-trader
+SCORE_PROMPT = f"""/day-trader
 
 Autopilot scoring run after the close. Nobody is watching this session: do not ask questions.
+{COMMAND_RULES}
 Follow playbook step 6 for every row from `python -m trader.journal pending`, using the closing price of
 each decision's trading day from get_equity_historicals. Then run `python -m trader.journal summary` and
 finish with a short Markdown report of what was scored and the summary figures."""
 
 
-REVIEW_PROMPT = """/day-trader
+REVIEW_PROMPT = f"""/day-trader
 
 Autopilot review run after scoring. Nobody is watching this session: do not ask questions.
+{COMMAND_RULES}
 You are reviewing the automated news bot (trader.newsbot). Use `python -m trader.journal summary`,
 `python -m trader.journal list --limit 200` and `python -m trader.journal events --limit 500`.
 Newsbot decisions have a thesis starting with "[newsbot]" and mode "newsbot-off" or "newsbot-paper";
@@ -152,7 +161,7 @@ Write a short Markdown report:
 3. Proposed changes to NEWSBOT_* thresholds, each with the evidence and the sample size. Say plainly
    when the sample is too small to justify a change. Do not edit any file; the user applies changes."""
 
-REVIEW_TOOLS = ["Bash(python -m trader.journal *)"]
+REVIEW_TOOLS = [f"Bash({py} -m trader.journal *)" for py in PYTHONS]
 
 
 def invoke_claude(prompt: str, run_dir: Path, tools: Optional[List[str]] = None) -> Dict[str, Any]:

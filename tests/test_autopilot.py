@@ -14,13 +14,24 @@ def test_allowed_tools_never_include_order_placement():
     tools = autopilot.allowed_tools("claude_ai_Robinhood")
     assert "mcp__claude_ai_Robinhood__review_equity_order" in tools
     assert not any("place_" in t or "exercise" in t or "cancel" in t for t in tools)
-    assert all(t.startswith("mcp__claude_ai_Robinhood__") or t.startswith("Bash(python -m trader.")
+    assert all(t.startswith(("mcp__claude_ai_Robinhood__", "Bash(python -m trader.",
+                             "Bash(.venv/bin/python -m trader."))
                for t in tools)
 
 
 def test_review_only_gets_the_journal():
-    assert autopilot.REVIEW_TOOLS == ["Bash(python -m trader.journal *)"]
+    assert autopilot.REVIEW_TOOLS == ["Bash(python -m trader.journal *)",
+                                      "Bash(.venv/bin/python -m trader.journal *)"]
     assert "Do not edit any file" in autopilot.REVIEW_PROMPT
+
+
+def test_every_prompt_tells_claude_to_run_plain_commands():
+    # A chained `source ... && python -m ...` command is denied by the allowlist in dontAsk mode.
+    prompts = [autopilot.SCORE_PROMPT, autopilot.REVIEW_PROMPT,
+               autopilot.run_prompt([], "review", None, NOW)]
+    for prompt in prompts:
+        assert "no `source`" in prompt and "`&&`" in prompt
+    assert "Bash(.venv/bin/python -m trader.status)" in autopilot.allowed_tools("x")
 
 
 def test_claude_command_is_locked_down(monkeypatch):
