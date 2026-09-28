@@ -156,3 +156,28 @@ def test_hook_script_blocks_on_malformed_input(tmp_path):
     result = _run_hook("not json", tmp_path)
     assert result.returncode == 2
     assert "blocking" in result.stderr
+
+
+def test_project_settings_register_the_guard():
+    """The hook only runs if .claude/settings.json exists and matches the order tools."""
+    import re
+
+    settings_path = PROJECT_ROOT / ".claude/settings.json"
+    assert settings_path.exists(), ".claude/settings.json is missing: the order guard is not registered"
+    settings = json.loads(settings_path.read_text())
+
+    pre = settings["hooks"]["PreToolUse"]
+    post = settings["hooks"]["PostToolUse"]
+    commands = [h["command"] for entry in pre + post for h in entry["hooks"]]
+    assert all(c.endswith("/.claude/hooks/order_guard.sh") for c in commands)
+
+    pre_matchers = [re.compile(entry["matcher"]) for entry in pre]
+    post_matchers = [re.compile(entry["matcher"]) for entry in post]
+    for server in ("robinhood-trading", "claude_ai_Robinhood", "Robinhood"):
+        for tool in ("place_equity_order", "place_option_order", "place_crypto_order", "exercise_option"):
+            assert any(m.search(f"mcp__{server}__{tool}") for m in pre_matchers), (server, tool)
+        assert any(m.search(f"mcp__{server}__review_equity_order") for m in post_matchers), server
+        assert not any(m.search(f"mcp__{server}__get_equity_quotes") for m in pre_matchers)
+
+    deny = settings["permissions"]["deny"]
+    assert "Read(/.env)" in deny

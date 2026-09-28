@@ -37,6 +37,8 @@ MANIFEST
 # json files
 *.json
 !.mcp.json
+# Claude Code project settings register the order guard hook; they must be committed.
+!.claude/settings.json
 
 # Virtual environments
 venv/
