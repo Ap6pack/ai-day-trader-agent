@@ -23,7 +23,9 @@ const API = (() => {
     let data = null;
     try { data = await res.json(); } catch { /* empty body */ }
     if (!res.ok) {
-      const err = new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+      const detail = data && (data.detail || data.message);
+      const text = Array.isArray(detail) ? detail.map((d) => `${(d.loc || []).slice(-1)[0] || ''} ${d.msg}`.trim()).join('; ') : detail;
+      const err = new Error(text || `HTTP ${res.status}`);
       err.status = res.status;
       throw err;
     }
@@ -53,7 +55,20 @@ const API = (() => {
     },
     getNewsbot()      { return request('GET', '/desk/newsbot'); },
     judgeSymbol(sym)  { return request('POST', `/desk/judge/${encodeURIComponent(sym)}`); },
-    submitPaperOrder(symbol, side, qty) { return request('POST', '/desk/orders', { symbol, side, qty }); },
+    analyzeSymbol(sym, portfolio = 'default') {
+      return request('POST', `/desk/analyze/${encodeURIComponent(sym)}?portfolio=${encodeURIComponent(portfolio)}`);
+    },
+    getAutopilot()    { return request('GET', '/desk/autopilot'); },
+    startAutopilot(cfg) { return request('POST', '/desk/autopilot', cfg); },
+    stopAutopilot()   { return request('DELETE', '/desk/autopilot'); },
+    pauseNewsbot(paused) { return request('POST', '/desk/newsbot/pause', { paused }); },
+    getPortfolios()   { return request('GET', '/desk/portfolios'); },
+    getPortfolio(name) { return request('GET', `/desk/portfolios/${encodeURIComponent(name)}`); },
+    createPortfolio(name, cash) { return request('POST', '/desk/portfolios', { name, cash }); },
+    deletePortfolio(name) { return request('DELETE', `/desk/portfolios/${encodeURIComponent(name)}`); },
+    submitPaperOrder(symbol, side, qty, destination = 'alpaca') {
+      return request('POST', '/desk/orders', { symbol, side, qty, destination });
+    },
     cancelOrder(id)   { return request('POST', `/desk/orders/${encodeURIComponent(id)}/cancel`); },
   };
 })();

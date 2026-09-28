@@ -11,12 +11,17 @@ What it shows, live over /ws/desk:
   * the Alpaca paper account: equity, positions, orders, market clock
   * the news bot's status: mode, universe, today's trades against the cap, latency
 
-JUDGE runs Jev on a symbol's recent headlines and applies the news bot's own rules,
-so you see what the bot would decide. The manual ticket sends Alpaca paper market
-orders; they are journaled as desk orders so reviews can tell them from the bot's.
+ANALYZE runs the multi-strategy analysis (technical + Jev sentiment + dividend) with
+sizing, stop/target and risk. JUDGE runs Jev on a symbol's recent headlines with the
+news bot's own rules. The AUTOPILOT panel starts and stops the desk autopilot
+(trader.autotrader: signals, record to a local portfolio, or Alpaca paper orders),
+and the NEWS BOT tab pauses or resumes the news bot's trading. Local paper
+portfolios (trader.portfolios) can be created, viewed and traded from the desk.
+The manual ticket sends Alpaca paper market orders or records a fill in a local
+portfolio; manual orders are journaled as desk orders.
 
-The news bot runs on its own (python -m trader.newsbot run); the desk never starts,
-stops or reconfigures it. Access: binds to 127.0.0.1 by default. Set DESK_TOKEN to
+The news bot itself runs on its own (python -m trader.newsbot run): the desk can
+pause and resume its trading but does not start it or change its rules. Access: binds to 127.0.0.1 by default. Set DESK_TOKEN to
 require a token (needed if you bind to another interface with DESK_HOST).
 """
 
@@ -29,6 +34,7 @@ import json
 import logging
 import os
 import statistics
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -39,9 +45,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from trader import alpaca, config, jev_news, market_feed, newsbot
+from trader import alpaca, analysis, autotrader, config, jev_news, market_feed, newsbot
 from trader.journal import Journal
 from trader.news_sources import alpaca_configured, get_news_articles
+from trader.portfolios import PortfolioError, Portfolios
 
 logger = logging.getLogger("trader.desk")
 
@@ -201,6 +208,9 @@ def journal_event(row: Any, settings: Optional[newsbot.Settings] = None) -> Opti
     if kind == newsbot.FLATTEN_EVENT:
         event.update(type="flatten", level="system", message=f"Flatten: {row['detail']}")
         return event
+    if kind == autotrader.ORDER_EVENT:
+        event.update(type="order_submitted", level="success", message=f"AUTO {row['detail']}")
+        return event
     if kind == DESK_ORDER_EVENT:
         ok = payload.get("submitted")
         event.update(type="order_submitted" if ok else "order_failed", level="success" if ok else "error",
@@ -219,12 +229,14 @@ def journal_event(row: Any, settings: Optional[newsbot.Settings] = None) -> Opti
 
 def decision_event(row: Any) -> Dict[str, Any]:
     thesis = row["thesis"] or ""
-    source = "BOT" if thesis.startswith("[newsbot]") else "CLAUDE"
+    source = ("BOT" if thesis.startswith("[newsbot]") else
+              "AUTO" if thesis.startswith(autotrader.THESIS_PREFIX) else "CLAUDE")
     conf = f" conf {row['confidence']:.2f}" if row["confidence"] is not None else ""
     return {
         "id": f"d{row['id']}", "type": "decision", "timestamp": row["ts"], "symbol": row["symbol"],
         "level": "info",
-        "message": f"{source} {row['action'].upper()} @ {row['price']}{conf} · {thesis.replace('[newsbot] ', '')[:110]}",
+        "message": f"{source} {row['action'].upper()} @ {row['price']}{conf} · "
+                   f"{thesis.replace('[newsbot] ', '').replace(autotrader.THESIS_PREFIX + ' ', '')[:110]}",
         "data": {k: row[k] for k in row.keys()},
     }
 
@@ -256,6 +268,7 @@ def newsbot_status(journal: Journal) -> Dict[str, Any]:
         "last_detail": rows[0]["detail"] if rows else None,
         "median_jev_ms": round(statistics.median(jev_ms)) if jev_ms else None,
         "max_jev_ms": max(jev_ms) if jev_ms else None,
+        "paused": newsbot.is_paused(),
     }
 
 
@@ -314,6 +327,14 @@ def _f(value: Any) -> Optional[float]:
         return None
 
 
+def _origin(client_order_id: Any) -> str:
+    cid = str(client_order_id or "")
+    for prefix, origin in (("newsbot-", "bot"), ("autopilot-", "autopilot"), ("desk-", "desk")):
+        if cid.startswith(prefix):
+            return origin
+    return "other"
+
+
 def account_snapshot() -> Dict[str, Any]:
     if market_feed.demo_mode_enabled():
         return {"connected": False, "message": "Demo mode"}
@@ -350,8 +371,7 @@ def account_snapshot() -> Dict[str, Any]:
             "filled_avg_price": _f(o.get("filled_avg_price")), "limit_price": _f(o.get("limit_price")),
             "type": o.get("type"), "order_class": o.get("order_class"), "status": o.get("status"),
             "submitted_at": o.get("submitted_at"),
-            "origin": "bot" if str(o.get("client_order_id") or "").startswith("newsbot-")
-            else "desk" if str(o.get("client_order_id") or "").startswith("desk-") else "other",
+            "origin": _origin(o.get("client_order_id")),
         } for o in orders],
         "clock": clock,
     }
@@ -384,8 +404,25 @@ class Hub:
         self.last_event_id = 0
         self.last_decision_id = 0
         self.tasks: List[asyncio.Task] = []
+        self.live_events: deque = deque(maxlen=HISTORY_EVENTS)
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def publish(self, event: Dict[str, Any]) -> None:
+        """Broadcast a live (non-journal) event; safe to call from worker threads."""
+        self.live_events.appendleft(event)
+        if self.loop is None or not self.loop.is_running():
+            return
+        message = {"type": "event", "data": event}
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                self.loop.create_task(self.broadcast(message))
+                return
+        except RuntimeError:
+            pass
+        asyncio.run_coroutine_threadsafe(self.broadcast(message), self.loop)
 
     def start(self) -> None:
+        self.loop = asyncio.get_running_loop()
         events, decisions = self.journal.events(1), self.journal.decisions(1)
         self.last_event_id = events[0]["id"] if events else 0
         self.last_decision_id = decisions[0]["id"] if decisions else 0
@@ -413,12 +450,16 @@ class Hub:
         sent = 0
         for row in rows:
             self.last_event_id = row["id"]
+            if row["kind"] == autotrader.ORDER_EVENT:
+                continue  # already streamed live by the autopilot
             event = journal_event(row, settings)
             if event:
                 await self.broadcast({"type": "event", "data": event})
                 sent += 1
         for row in decisions:
             self.last_decision_id = row["id"]
+            if (row["thesis"] or "").startswith(autotrader.THESIS_PREFIX):
+                continue  # the autopilot streamed its decision live
             await self.broadcast({"type": "event", "data": decision_event(row)})
             sent += 1
         return sent
@@ -476,21 +517,70 @@ class OrderRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=10)
     side: str = Field(pattern="^(buy|sell|BUY|SELL)$")
     qty: int = Field(ge=1, le=100000)
+    # "alpaca" (Alpaca paper account) or the name of a local portfolio
+    destination: str = Field(default="alpaca", min_length=1, max_length=40)
+
+
+class PortfolioRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    cash: float = Field(gt=0, le=1e9)
+
+
+class AutopilotRequest(BaseModel):
+    symbols: List[str] = Field(min_length=1, max_length=40)
+    interval_seconds: int = Field(ge=autotrader.MIN_INTERVAL, le=autotrader.MAX_INTERVAL)
+    mode: str = Field(pattern="^(signals|record|paper)$")
+    portfolio: str = Field(default="default", max_length=40)
+
+
+class PauseRequest(BaseModel):
+    paused: bool
 
 
 def create_app(journal: Optional[Journal] = None, background: bool = True) -> FastAPI:
     journal = journal or Journal()
     hub = Hub(journal)
+    portfolios = Portfolios(journal.path)
+    portfolios.ensure_default()
+    pilot = autotrader.AutoTrader(journal, portfolios, publish=hub.publish)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        hub.loop = asyncio.get_running_loop()
         if background:
             hub.start()
         yield
+        await pilot.stop(announce=False)
         await hub.stop()
 
     app = FastAPI(title="ADT Desk", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.hub = hub
+    app.state.autopilot = pilot
+    app.state.portfolios = portfolios
+
+    def quotes_for(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        missing = [s for s in symbols if s not in hub.last_quotes]
+        fresh = market_feed.get_quotes(missing) if missing else {}
+        hub.last_quotes.update(fresh)
+        return {s: hub.last_quotes[s] for s in symbols if s in hub.last_quotes}
+
+    def portfolio_view(name: str) -> Dict[str, Any]:
+        p = portfolios.get(name)
+        return {**portfolios.valuation(name, quotes_for([h["symbol"] for h in p["holdings"]])),
+                "fills": portfolios.fills(name, 25)}
+
+    def capital_for(source: str, symbol: str) -> "tuple[float, float, str]":
+        if source == "alpaca":
+            if not (alpaca_configured() and alpaca.is_paper()):
+                raise HTTPException(400, "Alpaca paper account not configured")
+            acct = alpaca.account()
+            held = next((float(p.get("qty") or 0) for p in alpaca.positions() if p.get("symbol") == symbol), 0.0)
+            return float(acct.get("equity") or 0), held, "alpaca paper equity"
+        try:
+            view = portfolio_view(source)
+        except PortfolioError as exc:
+            raise HTTPException(404, str(exc))
+        return view["equity"], portfolios.held(source, symbol), f"portfolio {source}"
 
     def require_token(request: Request) -> None:
         header = request.headers.get("authorization", "")
@@ -560,11 +650,102 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
         }})
         return result
 
+    @app.post("/api/desk/analyze/{symbol}", dependencies=auth)
+    async def analyze_symbol(symbol: str, portfolio: str = "default"):
+        symbol = (clean_symbols([symbol]) or [None])[0]
+        if not symbol:
+            raise HTTPException(400, "Invalid symbol")
+        capital, held, source = await run_in_threadpool(capital_for, portfolio, symbol)
+        result = await run_in_threadpool(lambda: analysis.analyze(symbol, capital, held, capital_source=source))
+        hub.publish({
+            "id": f"an{datetime.now(timezone.utc).timestamp()}", "type": "decision", "level": "info",
+            "timestamp": result["timestamp"], "symbol": symbol,
+            "message": f"ANALYZE {symbol}: {result['recommendation']} {result['quantity']} "
+                       f"({result['confidence']:.0%} conf) via {result['primary_strategy']}",
+            "data": {**result, "source": "analyze"},
+        })
+        return result
+
+    @app.get("/api/desk/autopilot", dependencies=auth)
+    async def autopilot_status():
+        return await run_in_threadpool(pilot.status)
+
+    @app.post("/api/desk/autopilot", dependencies=auth)
+    async def autopilot_start(req: AutopilotRequest):
+        try:
+            status = await pilot.start(autotrader.RunConfig(req.symbols, req.interval_seconds, req.mode, req.portfolio))
+        except (ValueError, PortfolioError) as exc:
+            raise HTTPException(400, str(exc))
+        await hub.broadcast({"type": "autopilot", "data": status})
+        return status
+
+    @app.delete("/api/desk/autopilot", dependencies=auth)
+    async def autopilot_stop():
+        status = await pilot.stop()
+        await hub.broadcast({"type": "autopilot", "data": status})
+        return status
+
+    @app.post("/api/desk/newsbot/pause", dependencies=auth)
+    async def newsbot_pause(req: PauseRequest):
+        newsbot.set_paused(req.paused)
+        status = await run_in_threadpool(newsbot_status, journal)
+        hub.publish({"id": f"np{datetime.now(timezone.utc).timestamp()}", "type": "flatten", "level": "system",
+                     "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": None,
+                     "message": "News bot trading PAUSED from the desk" if req.paused
+                     else "News bot trading RESUMED from the desk", "data": {}})
+        await hub.broadcast({"type": "newsbot", "data": status})
+        return status
+
+    @app.get("/api/desk/portfolios", dependencies=auth)
+    async def list_portfolios():
+        return await run_in_threadpool(lambda: [portfolio_view(n) for n in portfolios.names()])
+
+    @app.get("/api/desk/portfolios/{name}", dependencies=auth)
+    async def get_portfolio(name: str):
+        try:
+            return await run_in_threadpool(portfolio_view, name)
+        except PortfolioError as exc:
+            raise HTTPException(404, str(exc))
+
+    @app.post("/api/desk/portfolios", dependencies=auth)
+    async def create_portfolio(req: PortfolioRequest):
+        try:
+            await run_in_threadpool(portfolios.create, req.name, req.cash)
+        except PortfolioError as exc:
+            raise HTTPException(400, str(exc))
+        return await run_in_threadpool(portfolio_view, req.name.strip())
+
+    @app.delete("/api/desk/portfolios/{name}", dependencies=auth)
+    async def delete_portfolio(name: str):
+        if pilot.running and pilot.config and pilot.config.mode == "record" and pilot.config.portfolio == name:
+            raise HTTPException(400, "The autopilot is recording into this portfolio; stop it first")
+        try:
+            await run_in_threadpool(portfolios.delete, name)
+        except PortfolioError as exc:
+            raise HTTPException(404, str(exc))
+        return {"deleted": name}
+
     @app.post("/api/desk/orders", dependencies=auth)
     async def submit_order(req: OrderRequest):
         symbol = (clean_symbols([req.symbol]) or [None])[0]
         if not symbol:
             raise HTTPException(400, "Invalid symbol")
+        if req.destination != "alpaca":
+            price = (await run_in_threadpool(quotes_for, [symbol])).get(symbol, {}).get("last")
+            if not price:
+                raise HTTPException(400, f"No live price for {symbol}")
+            try:
+                fill = await run_in_threadpool(lambda: portfolios.record_fill(
+                    req.destination, symbol, req.side, req.qty, price, source="desk", note="manual"))
+                result = {"submitted": True, "fill": fill, "destination": req.destination}
+                detail = f"{symbol} {req.qty} @ {price} recorded in {req.destination}"
+            except PortfolioError as exc:
+                result = {"submitted": False, "skipped_reason": str(exc), "destination": req.destination}
+                detail = f"{symbol} not recorded in {req.destination}: {exc}"
+            await run_in_threadpool(lambda: journal.log_event(
+                DESK_ORDER_EVENT, tool="desk", symbol=symbol, side=req.side.lower(), quantity=req.qty,
+                price=price, detail=detail, payload=result))
+            return result
         if not alpaca_configured():
             raise HTTPException(400, "Alpaca keys not configured")
         if not alpaca.is_paper():
@@ -603,9 +784,13 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
         client = DeskClient(websocket)
         hub.clients.add(client)
         try:
+            events = await run_in_threadpool(recent_events, journal)
+            events = sorted(list(hub.live_events) + events, key=lambda e: e["timestamp"], reverse=True)
             hello = {
-                "events": await run_in_threadpool(recent_events, journal),
+                "events": events[:HISTORY_EVENTS],
                 "newsbot": await run_in_threadpool(newsbot_status, journal),
+                "autopilot": await run_in_threadpool(pilot.status),
+                "portfolios": portfolios.names(),
                 "account": hub.last_account,
             }
             await client.send({"type": "hello", "data": hello})

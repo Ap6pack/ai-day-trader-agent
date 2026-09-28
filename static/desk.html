@@ -28,7 +28,7 @@
       <form id="cmd-form" class="cmd">
         <span class="cmd-prompt">&gt;</span>
         <input id="cmd" autocomplete="off" spellcheck="false"
-               placeholder="Ticker or command — AAPL &lt;GO&gt;  ·  AAPL JG  ·  ADD TSLA  ·  BUY 10  ·  HELP">
+               placeholder="Ticker or command — AAPL &lt;GO&gt;  ·  AAPL AN  ·  AAPL JG  ·  AP ON  ·  BUY 10  ·  HELP">
         <button class="btn btn-go" type="submit">GO</button>
       </form>
       <div class="top-stats">
@@ -40,6 +40,7 @@
       </div>
       <div class="top-right">
         <span id="demo-badge" class="badge badge-demo" hidden title="Quotes and bars are simulated (DESK_DEMO_MODE=true)">DEMO DATA</span>
+        <span id="auto-badge" class="badge badge-ap" hidden title="The desk autopilot is running">AUTOPILOT</span>
         <span id="ap-badge" class="badge badge-ap" hidden title="The news bot journaled activity in the last 10 minutes">NEWS BOT</span>
         <span class="conn" id="conn" title="Live stream"><i></i><b>OFFLINE</b></span>
         <span id="user" class="muted"></span>
@@ -66,7 +67,10 @@
 
       <!-- Positions -->
       <section class="panel p-pos">
-        <div class="ph"><h2>POSITIONS</h2><span class="ph-sub">ALPACA PAPER</span><span class="ph-sub r" id="pos-upl"></span></div>
+        <div class="ph"><h2>POSITIONS</h2>
+          <select id="pos-src" class="ph-select" title="Alpaca paper account or a local portfolio"><option value="alpaca">ALPACA PAPER</option></select>
+          <button class="btn btn-ghost btn-xs" id="pf-new" type="button" title="Create a local paper portfolio">+ PORTFOLIO</button>
+          <span class="ph-sub r" id="pos-upl"></span></div>
         <div class="pb scroll">
           <table class="tbl">
             <thead><tr><th>SYM</th><th class="r">QTY</th><th class="r">AVG</th><th class="r">LAST</th><th class="r">U P&amp;L</th><th class="r">%</th></tr></thead>
@@ -94,7 +98,8 @@
               <button data-ind="vwap">VWAP</button>
               <button data-ind="levels" class="on" title="Bot entry / stop / target levels">LEVELS</button>
             </div>
-            <button class="btn btn-amber" id="analyze-btn" title="Jev judges this symbol's recent headlines with the news bot's rules">JUDGE</button>
+            <button class="btn btn-amber" id="analyze-btn" title="Technical (RSI, MACD, moving averages) + Jev sentiment + dividend, with size, stop/target and risk">ANALYZE</button>
+            <button class="btn btn-ghost" id="judge-btn" title="Jev judges this symbol's recent headlines with the news bot's rules">JUDGE</button>
           </div>
         </div>
         <div class="chart-wrap">
@@ -108,7 +113,7 @@
       <section class="panel p-signal">
         <div class="ph"><h2>AGENT SIGNAL</h2><span class="ph-sub" id="sig-time"></span></div>
         <div class="pb" id="signal-body">
-          <div class="empty">The news bot's latest call on this symbol appears here. Press JUDGE (or type <kbd>SYM JG</kbd>) to have Jev judge its recent headlines now.</div>
+          <div class="empty">The agents' latest call on this symbol appears here. Press ANALYZE (<kbd>SYM AN</kbd>) for the technical + sentiment + dividend view, or JUDGE (<kbd>SYM JG</kbd>) for the news bot's headline call.</div>
         </div>
       </section>
 
@@ -144,7 +149,7 @@
 
       <!-- Ticket -->
       <section class="panel p-ticket">
-        <div class="ph"><h2>ORDER TICKET</h2><span class="ph-sub">PAPER · MKT · DAY</span></div>
+        <div class="ph"><h2>ORDER TICKET</h2><span class="ph-sub" id="tk-sub">PAPER · MKT · DAY</span></div>
         <form class="pb ticket" id="ticket">
           <div class="side-toggle">
             <button type="button" data-side="BUY" class="on buy">BUY</button>
@@ -152,16 +157,43 @@
           </div>
           <label>SYMBOL <input id="tk-sym" maxlength="10" spellcheck="false" required></label>
           <label>QTY <input id="tk-qty" type="number" min="1" step="1" value="1" required></label>
+          <label class="wide">ROUTE TO <select id="tk-dest"><option value="alpaca">Alpaca paper account</option></select></label>
           <div class="tk-est">EST <b id="tk-est">—</b></div>
           <button class="btn btn-buy" id="tk-submit" type="submit">SEND BUY</button>
           <div class="tk-msg" id="tk-msg"></div>
         </form>
       </section>
 
-      <!-- News bot -->
+      <!-- Autopilot + news bot -->
       <section class="panel p-auto">
-        <div class="ph"><h2>NEWS BOT</h2><span class="ph-sub" id="ap-state">—</span></div>
-        <div class="pb auto" id="ap-status">
+        <div class="ph">
+          <div class="seg seg-sm" id="auto-tabs">
+            <button data-tab="pilot" class="on">AUTOPILOT</button>
+            <button data-tab="bot">NEWS BOT</button>
+          </div>
+          <span class="ph-sub" id="pilot-state">OFF</span>
+          <span class="ph-sub" id="ap-state" hidden>—</span>
+        </div>
+        <form class="pb auto" id="pilot-form">
+          <label class="wide">SYMBOLS <input id="pilot-syms" spellcheck="false" placeholder="uses watchlist"></label>
+          <label>EVERY
+            <select id="pilot-interval">
+              <option value="60">1 min</option><option value="300" selected>5 min</option>
+              <option value="900">15 min</option><option value="1800">30 min</option><option value="3600">1 hr</option>
+            </select>
+          </label>
+          <label>PORTFOLIO <select id="pilot-portfolio"><option value="default">default</option></select></label>
+          <label class="wide">MODE
+            <select id="pilot-mode">
+              <option value="signals">Signals only — analyze, don't trade</option>
+              <option value="record">Record trades in the local portfolio</option>
+              <option value="paper">Send Alpaca paper orders</option>
+            </select>
+          </label>
+          <div class="ap-status wide" id="pilot-status"></div>
+          <button class="btn btn-amber wide" id="pilot-toggle" type="submit">START AUTOPILOT</button>
+        </form>
+        <div class="pb auto" id="ap-status" hidden>
           <div class="empty">Waiting for the news bot's status…</div>
         </div>
       </section>
@@ -174,10 +206,13 @@
       <h2>COMMANDS</h2>
       <table class="tbl">
         <tr><td><kbd>AAPL</kbd> <kbd>&lt;GO&gt;</kbd></td><td>Load symbol into chart, quote, news and ticket</td></tr>
+        <tr><td><kbd>AAPL AN</kbd></td><td>Load and analyze: RSI / MACD / moving averages + Jev sentiment + dividend, with size, stop/target and risk</td></tr>
         <tr><td><kbd>AAPL JG</kbd></td><td>Load and have Jev judge its recent headlines with the news bot's rules</td></tr>
+        <tr><td><kbd>AP ON</kbd> / <kbd>AP OFF</kbd></td><td>Start / stop the desk autopilot with the panel's settings</td></tr>
+        <tr><td><kbd>PF NAME</kbd></td><td>Show a local portfolio in POSITIONS (<kbd>PF ALPACA</kbd> for the paper account)</td></tr>
         <tr><td><kbd>ADD TSLA</kbd> / <kbd>DEL TSLA</kbd></td><td>Add / remove from watchlist</td></tr>
         <tr><td><kbd>BUY 10</kbd> / <kbd>SELL 10</kbd></td><td>Pre-fill the manual paper ticket for the loaded symbol</td></tr>
-        <tr><td><kbd>BOT</kbd></td><td>Refresh the news bot panel (the bot runs on its own: python -m trader.newsbot run)</td></tr>
+        <tr><td><kbd>BOT</kbd> / <kbd>BOT PAUSE</kbd> / <kbd>BOT RESUME</kbd></td><td>Show the news bot tab / pause or resume its trading (the bot itself runs on its own: python -m trader.newsbot run)</td></tr>
         <tr><td><kbd>1M 5M 15M 1H 1D</kbd></td><td>Chart timeframe</td></tr>
         <tr><td><kbd>/</kbd></td><td>Focus the command line from anywhere</td></tr>
         <tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>Move through the watchlist</td></tr>

@@ -7,6 +7,23 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Features from the original desk (PR #5), rebuilt on the new app:
+  - `trader.analysis`: the multi-strategy analysis. `trader.technicals` (RSI, MACD,
+    SMA/EMA, ATR) gives the technical signal with the original rules, Jev's headline
+    judgments give sentiment, and `trader.dividends` gives dividend capture from Alpaca
+    corporate actions. They are fused into BUY / SELL / HOLD with a confidence, then
+    sized (quantity, ATR stop and target, risk/reward, position value, risk). The desk's
+    **ANALYZE** button (`SYM AN`) shows it with the original signal panel.
+  - `trader.portfolios`: any number of local paper portfolios (cash, holdings, average
+    price, realized and unrealized P&L) in the journal database. The desk can create
+    them, show one in POSITIONS and route the ticket to it.
+  - `trader.autotrader`: the desk autopilot, started and stopped from the desk's
+    AUTOPILOT tab (`AP ON` / `AP OFF`): chosen symbols, every 1 min to 1 hr, in signals,
+    record-to-portfolio or Alpaca paper order mode, with `AUTOPILOT_*` limits (minimum
+    confidence, daily cap, cooldown, minimum price, entry cutoff). Every step streams to
+    the activity feed; decisions and orders are journaled.
+  - News bot pause: the desk's NEWS BOT tab can pause and resume the bot's trading
+    (`BOT PAUSE` / `BOT RESUME`); while paused it keeps judging and journaling headlines.
 - `trader.desk`: the live trading desk (from PR #5) rebuilt on the new app and served by
   `python -m trader.desk`. Its front end (chart, watchlist, tape, news, positions,
   blotter, command line) is kept; it now streams the journal (news bot signals and orders
