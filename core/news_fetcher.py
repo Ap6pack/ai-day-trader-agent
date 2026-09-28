@@ -67,7 +67,9 @@ def get_alpaca_news(symbol, since=None, limit=ALPACA_MAX_LIMIT):
     }
     resp = requests.get(url, headers=headers, params=params, timeout=10)
     resp.raise_for_status()
-    return [_normalize_alpaca(item) for item in resp.json().get("news", []) if item.get("headline")]
+    articles = [_normalize_alpaca(item) for item in resp.json().get("news", []) if item.get("headline")]
+    logger.info(f"Alpaca news returned {len(articles)} articles for {symbol} since {params['start']}")
+    return articles
 
 
 def get_newsapi_articles(symbol):
@@ -77,6 +79,7 @@ def get_newsapi_articles(symbol):
     """
     api_key = settings.NEWS_API_KEY
     if not api_key:
+        logger.info("NEWS_API_KEY is not set; skipping NewsAPI")
         return []
     base_url = "https://newsapi.org/v2/everything"
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -108,4 +111,9 @@ def get_news_articles(symbol):
                 return articles
         except Exception as e:
             logger.warning(f"Alpaca news request failed for {symbol}, falling back to NewsAPI: {e}")
-    return get_newsapi_articles(symbol)
+    else:
+        logger.info("ALPACA_API_KEY/ALPACA_SECRET_KEY are not set; skipping Alpaca news")
+    articles = get_newsapi_articles(symbol)
+    if settings.NEWS_API_KEY:
+        logger.info(f"NewsAPI returned {len(articles)} articles for {symbol}")
+    return articles

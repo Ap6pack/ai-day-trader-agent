@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import config.settings  # noqa: E402,F401  (loads .env)
+from config import settings  # noqa: E402  (loads .env)
 from core import jev_news_analyzer  # noqa: E402
 from core.news_fetcher import get_news_articles  # noqa: E402
 
@@ -33,6 +33,13 @@ def main() -> int:
         print("TYPESAFE_API_KEY is not set.")
         return 1
 
+    def is_set(name):
+        return "set" if getattr(settings, name, None) else "MISSING"
+
+    print("Keys: " + ", ".join(
+        f"{name}={is_set(name)}"
+        for name in ("TYPESAFE_API_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "NEWS_API_KEY")
+    ))
     articles = get_news_articles(symbol)
     if articles:
         print(f"Fetched {len(articles)} articles from {articles[0].get('provider', 'newsapi')}.")
