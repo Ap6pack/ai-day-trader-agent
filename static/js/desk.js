@@ -392,7 +392,8 @@
     chart = LC.createChart($('chart'), {
       autoSize: true,
       localization: { locale: 'en-US' },
-      layout: { background: { color: '#0b0f14' }, textColor: '#6c7a89', fontFamily: getComputedStyle(document.body).fontFamily, fontSize: 11 },
+      // TradingView is credited in the help screen and the README instead of the chart logo.
+      layout: { background: { color: '#0b0f14' }, textColor: '#6c7a89', fontFamily: getComputedStyle(document.body).fontFamily, fontSize: 11, attributionLogo: false },
       grid: { vertLines: { color: '#121922' }, horzLines: { color: '#121922' } },
       crosshair: { mode: LC.CrosshairMode.Normal, vertLine: { color: '#ff9f1a55', labelBackgroundColor: '#7a4b0a' }, horzLine: { color: '#ff9f1a55', labelBackgroundColor: '#7a4b0a' } },
       rightPriceScale: { borderColor: '#1b232d' },
