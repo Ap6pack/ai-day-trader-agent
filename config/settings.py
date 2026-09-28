@@ -9,7 +9,9 @@ from dotenv import load_dotenv
 from dataclasses import dataclass
 from typing import Optional
 
-load_dotenv()
+# The project .env is the source of truth: without override, a stale variable
+# exported in the shell would silently shadow the key in .env.
+load_dotenv(override=True)
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DISCORD_GUILD_ID = os.getenv("DISCORD_GUILD_ID")
