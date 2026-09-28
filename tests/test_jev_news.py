@@ -122,3 +122,14 @@ def test_recency_decay_discounts_stale_news():
     stale = dict(fresh, headline="stale", direction=-1.0, published_at=_iso(24))
     result = jev_news.aggregate_judgments([fresh, stale], now=NOW)
     assert result["score"] > 0.5
+
+
+def test_judge_headline_returns_direction_probability_mass(fake_jev):
+    # The canned direction probabilities put 0.9 on levels 3-4 and 0.0 on 0-1; the
+    # news bot trades on these, so check they survive the SDK's parsing.
+    answers, requests = fake_jev
+    answers["Acme wins major contract"] = _answers(0.95, 3.6, 2.5, "product")
+    judgment = jev_news.judge_headline("ACME", {"title": "Acme wins major contract", "url": "https://x/9"})
+    assert judgment["p_bullish"] == pytest.approx(0.9)
+    assert judgment["p_bearish"] == pytest.approx(0.0)
+    assert len(requests) == 1
