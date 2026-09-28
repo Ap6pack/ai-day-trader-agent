@@ -225,6 +225,16 @@ class CandlestickDataFetcher:
                 'errors': List[str]  # Any errors encountered
             }
         """
+        from core.market_feed import demo_mode_enabled, demo_candles
+
+        if demo_mode_enabled():
+            return {
+                'success': True,
+                'source': 'demo',
+                'data': {'demo': demo_candles(symbol, intervals, outputsize)},
+                'errors': []
+            }
+
         errors = []
         successful_source = None
         result_data = {

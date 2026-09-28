@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Live Trading Desk (`/desk`)
+
+#### Added
+- Real-time trading terminal: streaming watchlist and ticker tape, live candlestick chart with SMA/EMA/VWAP and the agent's stop/target levels, agent signal breakdown, live agent activity feed, news, Alpaca paper positions, order blotter, paper order ticket, market clock and a Bloomberg-style command line.
+- `core/event_bus.py`: thread-safe in-process event bus. The analysis pipeline, trading workflow and Alpaca executor publish each step (analysis started, market data loaded, per-strategy signals, decision, order submitted/failed/skipped, trade recorded).
+- `core/market_feed.py`: batched Alpaca snapshot quotes and chart bars with Yahoo Finance fallback, plus a clearly labelled `DESK_DEMO_MODE` simulator.
+- `config/api/desk.py`: `/api/desk/*` REST endpoints (config, quotes, bars, news, events, account, order cancel, autopilot) and the `/ws/desk` WebSocket stream.
+- Autopilot: per-user background loop that re-analyzes a symbol list on an interval, in signals-only, local-record or Alpaca-paper-order mode.
+- `AlpacaExecutor.get_orders()` and `get_clock()`.
+- Vendored TradingView lightweight-charts 4.2.3 (Apache-2.0) under `static/vendor/`.
+
+---
+
 ## [3.2.0] - 2025-07-09
 
 ### 🎯 **Intelligent API Rate Limiting - Professional Rate Limit Handling**
