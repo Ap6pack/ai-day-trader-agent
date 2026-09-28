@@ -23,6 +23,7 @@ logger = get_logger("news_fetcher")
 ALPACA_NEWS_PATH = "/v1beta1/news"
 ALPACA_MAX_LIMIT = 50
 LOOKBACK_HOURS = 24
+NEWSAPI_LOOKBACK_DAYS = 3
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -74,7 +75,7 @@ def get_alpaca_news(symbol, since=None, limit=ALPACA_MAX_LIMIT):
 
 def get_newsapi_articles(symbol):
     """
-    Fetch news articles for the given symbol from NewsAPI for the last 24 hours.
+    Fetch news articles for the given symbol from NewsAPI for the last few days.
     Returns a list of articles.
     """
     api_key = settings.NEWS_API_KEY
@@ -82,10 +83,12 @@ def get_newsapi_articles(symbol):
         logger.info("NEWS_API_KEY is not set; skipping NewsAPI")
         return []
     base_url = "https://newsapi.org/v2/everything"
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
+    # NewsAPI's free plan delays articles by about a day, so a 24-hour window
+    # is often empty; look back further and let recency weighting discount it.
+    since = (datetime.now(timezone.utc) - timedelta(days=NEWSAPI_LOOKBACK_DAYS)).strftime('%Y-%m-%dT%H:%M:%S')
     params = {
         "q": symbol,
-        "from": yesterday,
+        "from": since,
         "sortBy": "publishedAt",
         "language": "en",
         "apiKey": api_key
