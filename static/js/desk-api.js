@@ -66,8 +66,8 @@ const API = (() => {
     getPortfolio(name) { return request('GET', `/desk/portfolios/${encodeURIComponent(name)}`); },
     createPortfolio(name, cash) { return request('POST', '/desk/portfolios', { name, cash }); },
     deletePortfolio(name) { return request('DELETE', `/desk/portfolios/${encodeURIComponent(name)}`); },
-    submitPaperOrder(symbol, side, qty, destination = 'alpaca') {
-      return request('POST', '/desk/orders', { symbol, side, qty, destination });
+    submitPaperOrder(symbol, side, qty, destination = 'alpaca', confirmLive = false) {
+      return request('POST', '/desk/orders', { symbol, side, qty, destination, confirm_live: confirmLive });
     },
     cancelOrder(id)   { return request('POST', `/desk/orders/${encodeURIComponent(id)}/cancel`); },
   };

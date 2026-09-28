@@ -20,7 +20,7 @@ def journal(tmp_path):
 @pytest.fixture
 def env(monkeypatch):
     for name in ("DESK_TOKEN", "DESK_DEMO_MODE", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TYPESAFE_API_KEY",
-                 "NEWSBOT_SYMBOLS", "NEWSBOT_EXECUTION", "ALPACA_TRADING_BASE_URL"):
+                 "NEWSBOT_SYMBOLS", "NEWSBOT_EXECUTION", "ALPACA_TRADING_BASE_URL", "ALPACA_LIVE_TRADING"):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
@@ -211,7 +211,7 @@ def test_manual_order_is_paper_only_and_journaled(env, journal, monkeypatch):
 
         env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
         refused = c.post("/api/desk/orders", json={"symbol": "NVDA", "side": "buy", "qty": 1})
-        assert refused.status_code == 400 and "paper" in refused.json()["detail"]
+        assert refused.status_code == 400 and "usable" in refused.json()["detail"]
         assert len(sent) == 1
 
 
@@ -260,12 +260,12 @@ def test_account_snapshot_marks_order_origin(env, monkeypatch):
     assert [o["origin"] for o in snap["orders"]] == ["bot", "desk", "autopilot"]
 
 
-def test_account_snapshot_refuses_live_endpoint(env):
+def test_account_snapshot_refuses_live_endpoint_without_opt_in(env):
     env.setenv("ALPACA_API_KEY", "k")
     env.setenv("ALPACA_SECRET_KEY", "s")
     env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
     snap = desk.account_snapshot()
-    assert snap["connected"] is False and "paper" in snap["message"]
+    assert snap["connected"] is False and "not a usable" in snap["message"]
 
 
 # --- analysis, autopilot, portfolios, pause ----------------------------------------------
@@ -368,3 +368,25 @@ def test_autopilot_rows_are_not_streamed_twice(env, journal):
     row = journal.events(1)[0]
     assert desk.journal_event(row)["message"].startswith("AUTO")
     assert desk.decision_event(journal.decisions(1)[0])["message"].startswith("AUTO BUY")
+
+
+def test_live_account_orders_need_explicit_confirmation(env, journal, monkeypatch):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+    env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    env.setenv("ALPACA_LIVE_TRADING", "true")
+    sent = []
+    monkeypatch.setattr(desk.alpaca, "submit_order", lambda p: sent.append(p) or {"id": "live-1234567", "status": "accepted"})
+    with client_for(journal) as c:
+        cfg = c.get("/api/desk/config").json()
+        assert cfg["account_mode"] == "live" and cfg["live_limits"]["max_order_usd"] == 500
+        body = {"symbol": "NVDA", "side": "buy", "qty": 1}
+        unconfirmed = c.post("/api/desk/orders", json=body)
+        assert unconfirmed.status_code == 400 and "LIVE" in unconfirmed.json()["detail"] and sent == []
+        assert c.post("/api/desk/orders", json={**body, "confirm_live": True}).json()["submitted"] is True
+        assert len(sent) == 1
+        event = journal.events(1)[0]
+        assert event["detail"].startswith("LIVE ") and '"account": "live"' in event["payload"]
+        # The autopilot's broker modes stay paper: it refuses to start on a live account.
+        refused = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60, "mode": "paper"})
+        assert refused.status_code == 400

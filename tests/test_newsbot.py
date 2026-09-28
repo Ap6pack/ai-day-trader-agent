@@ -88,8 +88,9 @@ def test_settings_defaults_and_validation():
     loaded = newsbot.load_settings({"NEWSBOT_EXECUTION": "PAPER", "NEWSBOT_SYMBOLS": "aapl, msft"})
     assert loaded.execution == "paper"
     assert loaded.symbols == frozenset({"AAPL", "MSFT"})
+    assert newsbot.load_settings({"NEWSBOT_EXECUTION": "live"}).execution == "live"
     with pytest.raises(ValueError):
-        newsbot.load_settings({"NEWSBOT_EXECUTION": "live"})
+        newsbot.load_settings({"NEWSBOT_EXECUTION": "real"})
     with pytest.raises(ValueError):
         newsbot.load_settings({"NEWSBOT_STOP_LOSS_PCT": "0"})
     with pytest.raises(ValueError, match="FLATTEN"):
@@ -525,3 +526,41 @@ def test_pause_blocks_orders_but_keeps_journaling(journal, tmp_path, monkeypatch
     bot, broker = make_bot(journal)
     bot.handle("ACME", article(title="another"), NOW, news_id=2)
     assert len(broker.orders) == 1
+
+
+# --- live (real money) --------------------------------------------------------------
+
+
+class LiveBroker(FakeBroker):
+    owned_flattens = 0
+
+    def flatten_owned(self, prefix):
+        assert prefix == newsbot.ORDER_PREFIX
+        self.owned_flattens += 1
+        return [{"symbol": "ACME"}]
+
+
+def test_live_flatten_closes_only_the_bots_own_positions(journal):
+    broker = LiveBroker(clock=HALF_DAY)
+    bot, _ = make_bot(journal, settings=Settings(execution="live"), broker=broker, clock=Clock(HALF_DAY_1252))
+    assert bot.maybe_flatten()["closed"] == 1
+    assert broker.owned_flattens == 1 and broker.flattens == 0
+
+
+def test_live_order_size_is_capped_by_the_live_limit(journal, monkeypatch):
+    monkeypatch.setenv("ALPACA_LIVE_MAX_ORDER_USD", "120")
+    bot, broker = make_bot(journal, settings=Settings(execution="live"), broker=LiveBroker())
+    bot.handle("ACME", article(), NOW)
+    assert broker.orders[0]["qty"] == "2"  # floor(120 / 50), not floor(500 / 50)
+
+
+def test_run_refuses_a_mode_that_does_not_match_the_account(monkeypatch, capsys):
+    monkeypatch.setattr(newsbot, "alpaca_configured", lambda: True)
+    monkeypatch.setattr(newsbot.jev_news, "is_configured", lambda: True)
+    monkeypatch.delenv("ALPACA_TRADING_BASE_URL", raising=False)
+    assert newsbot.run(Settings(execution="live")) == 2
+    assert "LIVE but the Alpaca account is PAPER" in capsys.readouterr().err
+    monkeypatch.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    monkeypatch.delenv("ALPACA_LIVE_TRADING", raising=False)
+    assert newsbot.run(Settings(execution="paper")) == 2
+    assert "ALPACA_LIVE_TRADING is not true" in capsys.readouterr().err

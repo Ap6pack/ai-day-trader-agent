@@ -165,6 +165,11 @@
     $('login').hidden = true; $('desk').hidden = false;
     $('logout').hidden = !S.config.auth_required;
     $('demo-badge').hidden = !S.config.demo_mode;
+    $('live-badge').hidden = !isLive();
+    const acctLabel = isLive() ? 'ALPACA LIVE' : 'ALPACA PAPER';
+    $('blotter-sub').textContent = acctLabel;
+    $('pos-src').options[0].textContent = acctLabel;
+    updateTicketMode();
     if (!S.config.timeframes.includes(S.tf)) S.tf = S.config.default_timeframe;
 
     S.watchlist = store.get('adt_desk_watchlist', null) || S.config.watchlist.slice();
@@ -178,9 +183,12 @@
     refreshAccount();
     refreshPortfolios();
     if (!S.config.alpaca_configured) {
-      $('tk-msg').innerHTML = '<span class="muted">Set ALPACA_API_KEY / ALPACA_SECRET_KEY to route paper orders.</span>';
+      $('tk-msg').innerHTML = '<span class="muted">Set ALPACA_API_KEY / ALPACA_SECRET_KEY to route Alpaca orders.</span>';
     }
   }
+
+  // The configured Alpaca account is real money (ALPACA_LIVE_TRADING + the live host).
+  const isLive = () => S.config?.account_mode === 'live' && !S.config?.demo_mode;
 
   /* ═══ WebSocket ═══ */
   function setConn(state) {
@@ -844,7 +852,7 @@
     opts($('pos-src'), '<option value="alpaca">ALPACA PAPER</option>');
     $('pos-src').value = S.posSource;
     const dest = $('tk-dest'), cur = dest.value;
-    dest.innerHTML = '<option value="alpaca">Alpaca paper account</option>'
+    dest.innerHTML = `<option value="alpaca">${isLive() ? 'Alpaca LIVE account (real money)' : 'Alpaca paper account'}</option>`
       + S.portfolios.map((n) => `<option value="${esc(n)}">Local portfolio · ${esc(n)}</option>`).join('');
     if ([...dest.options].some((o) => o.value === cur)) dest.value = cur;
     opts($('pilot-portfolio'));
@@ -906,7 +914,7 @@
   $('pos-body').addEventListener('click', (e) => { const r = e.target.closest('tr[data-sym]'); if (r) loadSymbol(r.dataset.sym); });
   $('orders-body').addEventListener('click', async (e) => {
     const c = e.target.closest('.cancel'); if (!c) return;
-    if (!confirm('Cancel this paper order?')) return;
+    if (!confirm(`Cancel this ${isLive() ? 'LIVE' : 'paper'} order?`)) return;
     try { await API.cancelOrder(c.dataset.id); refreshAccountSoon(); } catch (err) { toast(err.message); }
   });
 
@@ -953,7 +961,10 @@
   }
   function updateTicketMode() {
     const dest = $('tk-dest').value;
-    $('tk-sub').textContent = dest === 'alpaca' ? 'PAPER · MKT · DAY' : `LOCAL · ${dest.toUpperCase()} · AT LAST`;
+    const live = dest === 'alpaca' && isLive();
+    $('tk-sub').textContent = dest !== 'alpaca' ? `LOCAL · ${dest.toUpperCase()} · AT LAST`
+      : live ? 'LIVE MONEY · MKT · DAY' : 'PAPER · MKT · DAY';
+    $('ticket').closest('.panel').classList.toggle('tk-live', live);
   }
   $('tk-dest').addEventListener('change', updateTicketMode);
   $('tk-qty').addEventListener('input', updateTicketEst);
@@ -967,13 +978,22 @@
     const dest = $('tk-dest').value || 'alpaca';
     if (dest === 'alpaca' && !S.config.alpaca_configured) { msg.innerHTML = '<span class="down">Alpaca keys not configured.</span>'; return; }
     if (!/^[A-Z][A-Z.]{0,9}$/.test(sym) || !(qty > 0)) { msg.innerHTML = '<span class="down">Enter a symbol and quantity.</span>'; return; }
-    const what = dest === 'alpaca' ? `Send PAPER ${S.side} ${qty} ${sym} at market?`
-      : `Record ${S.side} ${qty} ${sym} at the last price in local portfolio "${dest}"?`;
-    if (!confirm(what)) return;
+    const live = dest === 'alpaca' && isLive();
+    if (live) {
+      const lim = S.config.live_limits || {};
+      const typed = prompt(`REAL MONEY: ${S.side} ${qty} ${sym} at market on your LIVE Alpaca account.\n`
+        + `Buys are capped at ${money(lim.max_order_usd)} per order and ${lim.max_orders_per_day ?? '—'} per day.\n\n`
+        + 'Type LIVE to send it.');
+      if ((typed || '').trim().toUpperCase() !== 'LIVE') { msg.innerHTML = '<span class="muted">Not sent.</span>'; return; }
+    } else {
+      const what = dest === 'alpaca' ? `Send PAPER ${S.side} ${qty} ${sym} at market?`
+        : `Record ${S.side} ${qty} ${sym} at the last price in local portfolio "${dest}"?`;
+      if (!confirm(what)) return;
+    }
     $('tk-submit').disabled = true;
     msg.textContent = 'Routing…';
     try {
-      const res = await API.submitPaperOrder(sym, S.side, qty, dest);
+      const res = await API.submitPaperOrder(sym, S.side, qty, dest, live);
       msg.innerHTML = !res.submitted ? `<span class="down">${esc(res.skipped_reason || 'Not submitted')}</span>`
         : res.fill ? `<span class="up">✓ RECORDED @ ${px(res.fill.price)} · cash ${money(res.fill.cash)}</span>`
         : `<span class="up">✓ ${esc(res.order?.status || 'submitted').toUpperCase()} · ${esc((res.order?.id || '').slice(0, 8))}</span>`;

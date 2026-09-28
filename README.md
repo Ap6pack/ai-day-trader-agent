@@ -14,9 +14,10 @@ what those tools do not provide:
   strategy works before risking money.
 - **A playbook** (`.claude/skills/day-trader`) that tells Claude how to analyze, size,
   review and journal a trade.
-- **A news bot** (`trader.newsbot`) that trades Alpaca's news stream on its own, on the
-  Alpaca **paper** account only: Jev judges each headline, rules in code decide, and a
-  bracket order (entry, stop, target) goes in with no approval step.
+- **A news bot** (`trader.newsbot`) that trades Alpaca's news stream on its own: Jev
+  judges each headline, rules in code decide, and a bracket order (entry, stop, target)
+  goes in with no approval step. Paper by default; real money only if you opt in
+  (see [Real money](#real-money-alpaca-live)).
 - **A live desk** (`trader.desk`) that shows all of it as it happens, runs the
   technical + sentiment + dividend analysis on demand, switches the desk autopilot and
   the news bot's trading on and off, and keeps local paper portfolios.
@@ -149,6 +150,41 @@ After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, 
   changes you agree with.
 - `run` (optional) has Claude analyze the scan shortlist in review mode.
 - `check` shows the setup and the MCP server names Claude Code sees.
+
+## Real money (Alpaca live)
+
+Everything runs on the Alpaca **paper** account unless you opt in. To trade real money:
+
+```bash
+# .env: both are required; either one alone refuses every order
+ALPACA_TRADING_BASE_URL=https://api.alpaca.markets
+ALPACA_LIVE_TRADING=true
+# Your LIVE account's keys (Alpaca issues separate keys for paper and live)
+ALPACA_API_KEY=...
+ALPACA_SECRET_KEY=...
+```
+
+Then each agent opts in on its own:
+
+- **News bot**: `NEWSBOT_EXECUTION=live`. `paper` or `live` must match the account, or
+  `run` refuses to start.
+- **Desk ticket**: the desk shows a red **LIVE MONEY** badge, and every order must be
+  confirmed by typing `LIVE`.
+- **Desk autopilot**: stays paper. Its paper mode refuses to start on a live account.
+
+Hard limits on every live buy, checked in `trader.alpaca` at the moment of sending, so
+no agent can skip them: `ALPACA_LIVE_MAX_ORDER_USD` (default $500 per order),
+`ALPACA_LIVE_MAX_ORDERS_PER_DAY` (default 3) and `ALPACA_LIVE_MAX_DAILY_LOSS_USD`
+(default $200; new buys stop for the day once the account is down that much). Sells
+are never blocked, so you can always get out.
+
+Your own holdings are safe: on a live account the news bot only sells and flattens
+shares it bought that day (tracked by its order ids), never positions you already
+hold, and "close every position" is paper only.
+
+Start small, watch the desk, and run `python -m trader.newsbot replay SYMBOL` on recent
+headlines first. Robinhood real-money trading is separate: it goes through Claude Code
+with `TRADER_MODE=live` and the order guard (see above).
 
 ## Live trading desk
 

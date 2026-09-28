@@ -39,6 +39,7 @@
         <div class="stat"><span class="k">NEW YORK</span><span class="v mono" id="t-clock">--:--:--</span></div>
       </div>
       <div class="top-right">
+        <span id="live-badge" class="badge badge-live" hidden title="The Alpaca account is LIVE: orders use real money">LIVE MONEY</span>
         <span id="demo-badge" class="badge badge-demo" hidden title="Quotes and bars are simulated (DESK_DEMO_MODE=true)">DEMO DATA</span>
         <span id="auto-badge" class="badge badge-ap" hidden title="The desk autopilot is running">AUTOPILOT</span>
         <span id="ap-badge" class="badge badge-ap" hidden title="The news bot journaled activity in the last 10 minutes">NEWS BOT</span>
@@ -68,7 +69,7 @@
       <!-- Positions -->
       <section class="panel p-pos">
         <div class="ph"><h2>POSITIONS</h2>
-          <select id="pos-src" class="ph-select" title="Alpaca paper account or a local portfolio"><option value="alpaca">ALPACA PAPER</option></select>
+          <select id="pos-src" class="ph-select" title="Alpaca paper account or a local portfolio"><option value="alpaca">ALPACA</option></select>
           <button class="btn btn-ghost btn-xs" id="pf-new" type="button" title="Create a local paper portfolio">+ PORTFOLIO</button>
           <span class="ph-sub r" id="pos-upl"></span></div>
         <div class="pb scroll">
@@ -138,7 +139,7 @@
 
       <!-- Blotter -->
       <section class="panel p-orders">
-        <div class="ph"><h2>ORDER BLOTTER</h2><span class="ph-sub">ALPACA PAPER</span></div>
+        <div class="ph"><h2>ORDER BLOTTER</h2><span class="ph-sub" id="blotter-sub">ALPACA</span></div>
         <div class="pb scroll">
           <table class="tbl">
             <thead><tr><th>TIME</th><th>SYM</th><th>SIDE</th><th class="r">QTY</th><th class="r">FILLED</th><th class="r">PRICE</th><th>STATUS</th><th></th></tr></thead>
@@ -157,7 +158,7 @@
           </div>
           <label>SYMBOL <input id="tk-sym" maxlength="10" spellcheck="false" required></label>
           <label>QTY <input id="tk-qty" type="number" min="1" step="1" value="1" required></label>
-          <label class="wide">ROUTE TO <select id="tk-dest"><option value="alpaca">Alpaca paper account</option></select></label>
+          <label class="wide">ROUTE TO <select id="tk-dest"><option value="alpaca">Alpaca account</option></select></label>
           <div class="tk-est">EST <b id="tk-est">—</b></div>
           <button class="btn btn-buy" id="tk-submit" type="submit">SEND BUY</button>
           <div class="tk-msg" id="tk-msg"></div>
@@ -211,7 +212,7 @@
         <tr><td><kbd>AP ON</kbd> / <kbd>AP OFF</kbd></td><td>Start / stop the desk autopilot with the panel's settings</td></tr>
         <tr><td><kbd>PF NAME</kbd></td><td>Show a local portfolio in POSITIONS (<kbd>PF ALPACA</kbd> for the paper account)</td></tr>
         <tr><td><kbd>ADD TSLA</kbd> / <kbd>DEL TSLA</kbd></td><td>Add / remove from watchlist</td></tr>
-        <tr><td><kbd>BUY 10</kbd> / <kbd>SELL 10</kbd></td><td>Pre-fill the manual paper ticket for the loaded symbol</td></tr>
+        <tr><td><kbd>BUY 10</kbd> / <kbd>SELL 10</kbd></td><td>Pre-fill the manual ticket for the loaded symbol</td></tr>
         <tr><td><kbd>BOT</kbd> / <kbd>BOT PAUSE</kbd> / <kbd>BOT RESUME</kbd></td><td>Show the news bot tab / pause or resume its trading (the bot itself runs on its own: python -m trader.newsbot run)</td></tr>
         <tr><td><kbd>1M 5M 15M 1H 1D</kbd></td><td>Chart timeframe</td></tr>
         <tr><td><kbd>/</kbd></td><td>Focus the command line from anywhere</td></tr>

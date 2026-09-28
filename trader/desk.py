@@ -1,5 +1,5 @@
 """
-Live trading desk: a browser window onto the agents, plus a manual paper ticket.
+Live trading desk: a browser window onto the agents, plus a manual ticket.
 
     python -m trader.desk            # http://127.0.0.1:8000/desk
 
@@ -8,7 +8,7 @@ What it shows, live over /ws/desk:
   * the agents' activity from the journal: every news bot signal with Jev's numbers
     and latency, its orders and end-of-day flatten, Claude's decisions and the order
     guard's reviews, plus manual desk orders
-  * the Alpaca paper account: equity, positions, orders, market clock
+  * the Alpaca account (paper, or live when opted in): equity, positions, orders, clock
   * the news bot's status: mode, universe, today's trades against the cap, latency
 
 ANALYZE runs the multi-strategy analysis (technical + Jev sentiment + dividend) with
@@ -17,8 +17,10 @@ news bot's own rules. The AUTOPILOT panel starts and stops the desk autopilot
 (trader.autotrader: signals, record to a local portfolio, or Alpaca paper orders),
 and the NEWS BOT tab pauses or resumes the news bot's trading. Local paper
 portfolios (trader.portfolios) can be created, viewed and traded from the desk.
-The manual ticket sends Alpaca paper market orders or records a fill in a local
-portfolio; manual orders are journaled as desk orders.
+The manual ticket sends Alpaca market orders or records a fill in a local
+portfolio; manual orders are journaled as desk orders. When the configured
+Alpaca account is LIVE (trader.alpaca), each ticket order must be confirmed
+by typing LIVE, and the ALPACA_LIVE_* limits apply to buys.
 
 The news bot itself runs on its own (python -m trader.newsbot run): the desk can
 pause and resume its trading but does not start it or change its rules. Access: binds to 127.0.0.1 by default. Set DESK_TOKEN to
@@ -128,6 +130,9 @@ def desk_config() -> Dict[str, Any]:
         "demo_mode": market_feed.demo_mode_enabled(),
         "alpaca_configured": alpaca_configured(),
         "paper": alpaca.is_paper(),
+        # "paper", "live" (real money) or None when ALPACA_TRADING_BASE_URL is unusable.
+        "account_mode": alpaca._mode_or_none(),
+        "live_limits": dataclasses.asdict(alpaca.LiveLimits.from_env()) if alpaca.is_live() else None,
         "jev_configured": jev_news.is_configured(),
         "auth_required": desk_token() is not None,
         "watchlist": default_watchlist(),
@@ -317,7 +322,7 @@ def judge_symbol(symbol: str) -> Dict[str, Any]:
     }
 
 
-# --- Alpaca paper account ------------------------------------------------------------
+# --- Alpaca account ------------------------------------------------------------
 
 
 def _f(value: Any) -> Optional[float]:
@@ -340,8 +345,9 @@ def account_snapshot() -> Dict[str, Any]:
         return {"connected": False, "message": "Demo mode"}
     if not alpaca_configured():
         return {"connected": False, "message": "Alpaca keys not configured"}
-    if not alpaca.is_paper():
-        return {"connected": False, "message": "The desk shows the Alpaca paper account only"}
+    mode = alpaca._mode_or_none()
+    if mode is None:
+        return {"connected": False, "message": "ALPACA_TRADING_BASE_URL is not a usable Alpaca account"}
     try:
         acct, positions, orders, clock = alpaca.account(), alpaca.positions(), alpaca.orders(25), alpaca.market_clock()
     except Exception as exc:
@@ -349,6 +355,7 @@ def account_snapshot() -> Dict[str, Any]:
     equity, last_equity = _f(acct.get("equity")), _f(acct.get("last_equity"))
     return {
         "connected": True,
+        "mode": mode,
         "account": {
             "status": acct.get("status"),
             "equity": equity,
@@ -517,8 +524,10 @@ class OrderRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=10)
     side: str = Field(pattern="^(buy|sell|BUY|SELL)$")
     qty: int = Field(ge=1, le=100000)
-    # "alpaca" (Alpaca paper account) or the name of a local portfolio
+    # "alpaca" (the configured Alpaca account) or the name of a local portfolio
     destination: str = Field(default="alpaca", min_length=1, max_length=40)
+    # Must be true for an order to the LIVE (real money) Alpaca account.
+    confirm_live: bool = False
 
 
 class PortfolioRequest(BaseModel):
@@ -571,11 +580,12 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
 
     def capital_for(source: str, symbol: str) -> "tuple[float, float, str]":
         if source == "alpaca":
-            if not (alpaca_configured() and alpaca.is_paper()):
-                raise HTTPException(400, "Alpaca paper account not configured")
+            mode = alpaca._mode_or_none()
+            if not (alpaca_configured() and mode):
+                raise HTTPException(400, "Alpaca account not configured")
             acct = alpaca.account()
             held = next((float(p.get("qty") or 0) for p in alpaca.positions() if p.get("symbol") == symbol), 0.0)
-            return float(acct.get("equity") or 0), held, "alpaca paper equity"
+            return float(acct.get("equity") or 0), held, f"alpaca {mode} equity"
         try:
             view = portfolio_view(source)
         except PortfolioError as exc:
@@ -748,8 +758,11 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
             return result
         if not alpaca_configured():
             raise HTTPException(400, "Alpaca keys not configured")
-        if not alpaca.is_paper():
-            raise HTTPException(400, "The desk sends Alpaca paper orders only")
+        mode = alpaca._mode_or_none()
+        if mode is None:
+            raise HTTPException(400, "ALPACA_TRADING_BASE_URL is not a usable Alpaca account")
+        if mode == "live" and not req.confirm_live:
+            raise HTTPException(400, "This is the LIVE (real money) account: confirm the order to send it")
         payload = alpaca.market_order_payload(symbol, req.side, req.qty)
         quote = hub.last_quotes.get(symbol) or {}
         try:
@@ -759,10 +772,12 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
         except Exception as exc:
             result = {"submitted": False, "skipped_reason": str(exc)}
             detail = f"{symbol} rejected: {exc}"
+        if mode == "live":
+            detail = f"LIVE {detail}"
         await run_in_threadpool(lambda: journal.log_event(
             DESK_ORDER_EVENT, tool="desk", symbol=symbol, side=req.side.lower(), quantity=req.qty,
             price=quote.get("last"), detail=detail,
-            payload={**result, "request": payload}))
+            payload={**result, "request": payload, "account": mode}))
         return result
 
     @app.post("/api/desk/orders/{order_id}/cancel", dependencies=auth)

@@ -7,6 +7,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Opt-in real money on Alpaca. `ALPACA_TRADING_BASE_URL=https://api.alpaca.markets`
+  plus `ALPACA_LIVE_TRADING=true` (both required; anything else refuses every order).
+  Every live buy is checked in `trader.alpaca` against `ALPACA_LIVE_MAX_ORDER_USD`,
+  `ALPACA_LIVE_MAX_ORDERS_PER_DAY` and `ALPACA_LIVE_MAX_DAILY_LOSS_USD`; sells always
+  pass. `NEWSBOT_EXECUTION=live` lets the news bot trade it (the mode must match the
+  account); on live it flattens only the shares it bought (`flatten_owned`), and
+  `close_all_positions` is paper only. The desk shows the live account with a LIVE
+  MONEY badge and requires typing LIVE for each ticket order. The desk autopilot stays
+  paper only.
 - Features from the original desk (PR #5), rebuilt on the new app:
   - `trader.analysis`: the multi-strategy analysis. `trader.technicals` (RSI, MACD,
     SMA/EMA, ATR) gives the technical signal with the original rules, Jev's headline

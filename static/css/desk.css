@@ -276,6 +276,9 @@ input::placeholder { color: var(--dim); }
 .ph-select { background: transparent; border: 1px solid var(--line-2); color: var(--muted); font: inherit; font-size: 10px; letter-spacing: .06em; padding: 1px 4px; max-width: 150px; }
 .btn-xs { padding: 1px 6px; font-size: 10px; }
 #pos-upl { white-space: nowrap; }
+.badge-live { background: var(--down); color: #000; font-weight: 900; animation: live-pulse 2s ease-in-out infinite; }
+@keyframes live-pulse { 50% { opacity: .65; } }
+.tk-live #tk-sub { color: var(--down); font-weight: 800; }
 #ap-status .btn { margin-bottom: 6px; }
 .sig-meta.muted { color: var(--muted); }
 .ap-status { font-size: 11px; color: var(--muted); }
