@@ -19,9 +19,11 @@ def test_allowed_tools_never_include_order_placement():
                for t in tools)
 
 
-def test_review_only_gets_the_journal():
-    assert autopilot.REVIEW_TOOLS == ["Bash(python -m trader.journal *)",
-                                      "Bash(.venv/bin/python -m trader.journal *)"]
+def test_review_only_gets_the_journal_and_status():
+    assert autopilot.REVIEW_TOOLS == ["Bash(python -m trader.journal *)", "Bash(python -m trader.status)",
+                                      "Bash(.venv/bin/python -m trader.journal *)",
+                                      "Bash(.venv/bin/python -m trader.status)"]
+    assert not any("order" in t or "mcp__" in t for t in autopilot.REVIEW_TOOLS)
     assert "Do not edit any file" in autopilot.REVIEW_PROMPT
 
 

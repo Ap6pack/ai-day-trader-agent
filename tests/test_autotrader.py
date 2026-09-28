@@ -39,6 +39,9 @@ class Broker:
         if self.mode != expected:
             raise alpaca.AccountError(f"{who} is set to trade {expected.upper()} but the account is {self.mode.upper()}")
 
+    def owned_positions(self, prefix):
+        return {s: {"qty": q, "open_order_ids": []} for s, q in self.owned.items()}
+
     def owned_qty(self, prefix, symbol):
         assert prefix == "autopilot-"
         return self.owned.get(symbol, 0.0)
@@ -250,3 +253,38 @@ def test_pre_close_flatten_runs_once_for_broker_modes_only(setup):
     early = Broker(clock={"is_open": True, "next_close": "2026-09-28T16:00:00-04:00"})
     trader.broker = early
     assert trader.maybe_flatten(RunConfig(["NVDA"], 300, "paper")) is None and early.flattened == 0
+
+
+# --- AUTO: today's in-play stocks -------------------------------------------------------
+
+
+def test_auto_config_validation():
+    assert RunConfig(["auto"], 300).validate().auto
+    assert not RunConfig(["NVDA"], 300).validate().auto
+    with pytest.raises(ValueError, match="AUTO on its own"):
+        RunConfig(["AUTO", "NVDA"], 300).validate()
+
+
+def test_auto_analyzes_the_in_play_list_capped_plus_what_it_holds(setup):
+    trader, journal, portfolios, broker, events, results, calls = setup
+    lists = [["nvda", "tsla", "amd", "pltr"]]
+    trader.universe = lambda: lists[-1]
+    trader.limits = Limits(max_symbols=3)
+    for sym in ("NVDA", "TSLA", "AMD", "PLTR", "KO"):
+        results[sym] = decision(sym, rec="HOLD", qty=0)
+    trader.run_cycle(RunConfig(["AUTO"], 300, "signals"))
+    assert [c[0] for c in calls] == ["NVDA", "TSLA", "AMD"]
+    assert any("universe: 3 in-play" in e["message"] for e in events)
+    assert trader.status()["universe"] == ["NVDA", "TSLA", "AMD"]
+
+    # A failed refresh keeps the last list; paper mode also re-checks what the autopilot holds.
+    calls.clear()
+
+    def down():
+        raise RuntimeError("screener down")
+
+    trader.universe = down
+    broker.owned = {"KO": 4.0}
+    trader.run_cycle(RunConfig(["AUTO"], 300, "paper"))
+    assert [c[0] for c in calls] == ["KO", "NVDA", "TSLA", "AMD"]
+    assert any("universe refresh failed" in e["message"] for e in events)

@@ -31,6 +31,8 @@ def status() -> dict:
             "symbols": sorted(bot.symbols),
             "trading_base_url": alpaca.trading_base_url(),
             "paper": alpaca.is_paper(),
+            # "paper", "live" (real money, opted in) or null when the base URL is unusable.
+            "account_mode": alpaca._mode_or_none(),
             "orders_today": journal.count_events_today(newsbot.ORDER_EVENT),
         },
         "journal": str(journal.path),

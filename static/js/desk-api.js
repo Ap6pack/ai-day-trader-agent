@@ -62,6 +62,7 @@ const API = (() => {
     startAutopilot(cfg) { return request('POST', '/desk/autopilot', cfg); },
     stopAutopilot()   { return request('DELETE', '/desk/autopilot'); },
     pauseNewsbot(paused) { return request('POST', '/desk/newsbot/pause', { paused }); },
+    runNewsbot(run)   { return request('POST', '/desk/newsbot/process', { run }); },
     getPortfolios()   { return request('GET', '/desk/portfolios'); },
     getPortfolio(name) { return request('GET', `/desk/portfolios/${encodeURIComponent(name)}`); },
     createPortfolio(name, cash) { return request('POST', '/desk/portfolios', { name, cash }); },

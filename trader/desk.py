@@ -40,7 +40,8 @@ import statistics
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -52,6 +53,7 @@ from trader import alpaca, analysis, autotrader, config, jev_news, market_feed, 
 from trader.journal import Journal
 from trader.news_sources import alpaca_configured, get_news_articles
 from trader.portfolios import PortfolioError, Portfolios
+from trader.supervisor import NewsbotProcess
 
 logger = logging.getLogger("trader.desk")
 
@@ -141,7 +143,52 @@ def desk_config() -> Dict[str, Any]:
         "default_timeframe": market_feed.DEFAULT_TIMEFRAME,
         "quote_interval_seconds": quote_interval_seconds(),
         "newsbot": _jsonable(dataclasses.asdict(settings)) if settings else None,
+        "agents": _jsonable(dataclasses.asdict(agent_settings())),
     }
+
+
+# --- agents the desk starts on its own ----------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class AgentSettings:
+    """What `python -m trader.desk` starts by itself, so the agents run without you."""
+    start_newsbot: bool = True
+    autopilot_mode: str = "signals"          # off, or an autotrader mode
+    autopilot_symbols: Tuple[str, ...] = (autotrader.AUTO,)
+    autopilot_interval_seconds: int = 300
+    autopilot_portfolio: str = "default"
+
+
+def agent_settings() -> AgentSettings:
+    mode = (os.getenv("DESK_AUTOPILOT_MODE") or "signals").strip().lower()
+    if mode not in ("off",) + autotrader.MODES:
+        logger.error(f"DESK_AUTOPILOT_MODE={mode!r} is not off/{'/'.join(autotrader.MODES)}; autopilot stays off")
+        mode = "off"
+    symbols = tuple(s.strip().upper() for s in (os.getenv("DESK_AUTOPILOT_SYMBOLS") or "auto").split(",")
+                    if s.strip())
+    try:
+        interval = int(os.getenv("DESK_AUTOPILOT_INTERVAL_SECONDS") or 300)
+    except ValueError:
+        interval = 300
+    return AgentSettings(
+        start_newsbot=(os.getenv("DESK_START_NEWSBOT") or "true").strip().lower() == "true",
+        autopilot_mode=mode,
+        autopilot_symbols=symbols or (autotrader.AUTO,),
+        autopilot_interval_seconds=interval,
+        autopilot_portfolio=(os.getenv("DESK_AUTOPILOT_PORTFOLIO") or "default").strip(),
+    )
+
+
+def newsbot_start_blocker() -> Optional[str]:
+    """Why the desk cannot start the news bot, or None."""
+    if market_feed.demo_mode_enabled():
+        return "demo mode (DESK_DEMO_MODE=true) has no real news stream"
+    if not alpaca_configured():
+        return "ALPACA_API_KEY / ALPACA_SECRET_KEY are not set"
+    if not jev_news.is_configured():
+        return "TYPESAFE_API_KEY is not set (Jev judges every headline)"
+    return None
 
 
 # --- journal rows -> desk events ------------------------------------------------
@@ -414,13 +461,27 @@ class Hub:
         self.tasks: List[asyncio.Task] = []
         self.live_events: deque = deque(maxlen=HISTORY_EVENTS)
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        # Set when the desk runs the news bot itself (DESK_START_NEWSBOT).
+        self.newsbot_process: Optional[NewsbotProcess] = None
+
+    def newsbot_snapshot(self) -> Dict[str, Any]:
+        status = newsbot_status(self.journal)
+        status["process"] = self.newsbot_process.status() if self.newsbot_process else None
+        return status
 
     def publish(self, event: Dict[str, Any]) -> None:
         """Broadcast a live (non-journal) event; safe to call from worker threads."""
         self.live_events.appendleft(event)
+        self.send_threadsafe({"type": "event", "data": event})
+
+    def system_event(self, message: str, level: str = "system") -> None:
+        now = datetime.now(timezone.utc)
+        self.publish({"id": f"sys{now.timestamp()}", "type": "system", "level": level, "symbol": None,
+                      "timestamp": now.isoformat(timespec="seconds"), "message": message, "data": {}})
+
+    def send_threadsafe(self, message: Dict[str, Any]) -> None:
         if self.loop is None or not self.loop.is_running():
             return
-        message = {"type": "event", "data": event}
         try:
             if asyncio.get_running_loop() is self.loop:
                 self.loop.create_task(self.broadcast(message))
@@ -477,7 +538,7 @@ class Hub:
             try:
                 if await self.poll_journal():
                     await self.broadcast({"type": "newsbot",
-                                          "data": await run_in_threadpool(newsbot_status, self.journal)})
+                                          "data": await run_in_threadpool(self.newsbot_snapshot)})
             except Exception:
                 logger.exception("Journal poll failed")
             await asyncio.sleep(JOURNAL_POLL_SECONDS)
@@ -488,7 +549,7 @@ class Hub:
             if self.clients:
                 try:
                     await self.broadcast({"type": "newsbot",
-                                          "data": await run_in_threadpool(newsbot_status, self.journal)})
+                                          "data": await run_in_threadpool(self.newsbot_snapshot)})
                 except Exception:
                     logger.exception("News bot status failed")
 
@@ -549,20 +610,69 @@ class PauseRequest(BaseModel):
     paused: bool
 
 
-def create_app(journal: Optional[Journal] = None, background: bool = True) -> FastAPI:
+class ProcessRequest(BaseModel):
+    run: bool
+
+
+def create_app(journal: Optional[Journal] = None, background: bool = True,
+               start_agents: Optional[bool] = None,
+               newsbot_process: Optional[NewsbotProcess] = None) -> FastAPI:
+    """start_agents (default: same as background) starts the news bot and the
+    autopilot per AgentSettings when the server starts."""
     journal = journal or Journal()
     hub = Hub(journal)
     portfolios = Portfolios(journal.path)
     portfolios.ensure_default()
-    pilot = autotrader.AutoTrader(journal, portfolios, publish=hub.publish)
+    def pilot_universe() -> List[str]:
+        # Demo mode has no screeners: AUTO uses the watchlist so the autopilot still has work.
+        if market_feed.demo_mode_enabled():
+            return default_watchlist()
+        return autotrader.load_universe()
+
+    pilot = autotrader.AutoTrader(journal, portfolios, publish=hub.publish, universe=pilot_universe)
+
+    def process_changed(status: Dict[str, Any]) -> None:
+        hub.send_threadsafe({"type": "newsbot_process", "data": status})
+        if status.get("error"):
+            hub.system_event(f"News bot stopped: {status['error']}", level="error")
+
+    proc = newsbot_process or NewsbotProcess(log_path=journal.path.with_name("newsbot.log"),
+                                             on_change=process_changed)
+    hub.newsbot_process = proc
+
+    async def launch_agents() -> None:
+        settings = agent_settings()
+        if settings.start_newsbot:
+            blocker = newsbot_start_blocker()
+            if blocker:
+                hub.system_event(f"News bot not started: {blocker}", level="warning")
+            else:
+                await run_in_threadpool(proc.start)
+                hub.system_event("News bot started by the desk (DESK_START_NEWSBOT); it restarts itself if it stops")
+        if settings.autopilot_mode != "off":
+            run = autotrader.RunConfig(list(settings.autopilot_symbols), settings.autopilot_interval_seconds,
+                                       settings.autopilot_mode, settings.autopilot_portfolio)
+            try:
+                status = await pilot.start(run)
+            except Exception as exc:
+                hub.system_event(f"Autopilot not started ({settings.autopilot_mode}): {exc}", level="error")
+            else:
+                if settings.autopilot_mode == "live":
+                    hub.system_event("Autopilot started in LIVE mode from DESK_AUTOPILOT_MODE: REAL MONEY",
+                                     level="warning")
+                await hub.broadcast({"type": "autopilot", "data": status})
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.loop = asyncio.get_running_loop()
         if background:
             hub.start()
+            hub.tasks.append(asyncio.create_task(proc.watch()))
+        if background if start_agents is None else start_agents:
+            await launch_agents()
         yield
         await pilot.stop(announce=False)
+        await run_in_threadpool(proc.stop)
         await hub.stop()
 
     app = FastAPI(title="ADT Desk", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -642,7 +752,7 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
 
     @app.get("/api/desk/newsbot", dependencies=auth)
     async def get_newsbot():
-        return await run_in_threadpool(newsbot_status, journal)
+        return await run_in_threadpool(hub.newsbot_snapshot)
 
     @app.get("/api/desk/account", dependencies=auth)
     async def get_account():
@@ -703,11 +813,27 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
     @app.post("/api/desk/newsbot/pause", dependencies=auth)
     async def newsbot_pause(req: PauseRequest):
         newsbot.set_paused(req.paused)
-        status = await run_in_threadpool(newsbot_status, journal)
+        status = await run_in_threadpool(hub.newsbot_snapshot)
         hub.publish({"id": f"np{datetime.now(timezone.utc).timestamp()}", "type": "flatten", "level": "system",
                      "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": None,
                      "message": "News bot trading PAUSED from the desk" if req.paused
                      else "News bot trading RESUMED from the desk", "data": {}})
+        await hub.broadcast({"type": "newsbot", "data": status})
+        return status
+
+    @app.post("/api/desk/newsbot/process", dependencies=auth)
+    async def newsbot_process_control(req: ProcessRequest):
+        """Start or stop the news bot process the desk runs (not one started from a terminal)."""
+        if req.run:
+            blocker = newsbot_start_blocker()
+            if blocker:
+                raise HTTPException(400, f"Cannot start the news bot: {blocker}")
+            await run_in_threadpool(proc.start)
+            hub.system_event("News bot started from the desk")
+        else:
+            await run_in_threadpool(proc.stop)
+            hub.system_event("News bot stopped from the desk")
+        status = await run_in_threadpool(hub.newsbot_snapshot)
         await hub.broadcast({"type": "newsbot", "data": status})
         return status
 
@@ -808,7 +934,7 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
             events = sorted(list(hub.live_events) + events, key=lambda e: e["timestamp"], reverse=True)
             hello = {
                 "events": events[:HISTORY_EVENTS],
-                "newsbot": await run_in_threadpool(newsbot_status, journal),
+                "newsbot": await run_in_threadpool(hub.newsbot_snapshot),
                 "autopilot": await run_in_threadpool(pilot.status),
                 "portfolios": portfolios.names(),
                 "account": hub.last_account,
@@ -832,9 +958,58 @@ def create_app(journal: Optional[Journal] = None, background: bool = True) -> Fa
     return app
 
 
-def main() -> int:
+SERVICE_NAME = "ai-day-trader-desk"
+
+
+def service_unit(python: str, project_root: Path) -> str:
+    """A systemd user service: the desk (and the agents it starts) runs at boot,
+    around the clock, and comes back if it crashes."""
+    return f"""[Unit]
+Description=AI day trader desk (news bot + autopilot + dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={project_root}
+ExecStart={python} -m trader.desk
+Restart=always
+RestartSec=10
+# The desk stops the news bot and the autopilot before exiting.
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def print_service() -> int:
+    import sys
+
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    print(f"# Save as {unit_dir / (SERVICE_NAME + '.service')}, then run:")
+    print(f"#   systemctl --user daemon-reload")
+    print(f"#   systemctl --user enable --now {SERVICE_NAME}")
+    print(f"#   loginctl enable-linger $USER      # keep it running when you are logged out")
+    print(f"# Logs: journalctl --user -u {SERVICE_NAME} -f   (news bot: data/newsbot.log)")
+    print(f"# Stop: systemctl --user stop {SERVICE_NAME}")
+    print()
+    print(service_unit(sys.executable, config.PROJECT_ROOT), end="")
+    return 0
+
+
+def main(argv: "tuple[str, ...] | List[str]" = ()) -> int:
+    import argparse
+
     import uvicorn
 
+    parser = argparse.ArgumentParser(prog="python -m trader.desk")
+    parser.add_argument("command", nargs="?", choices=["serve", "service"], default="serve",
+                        help="serve (default): run the desk and its agents; service: print a systemd "
+                             "user service that keeps them running")
+    if parser.parse_args(list(argv)).command == "service":
+        return print_service()
     config.load_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     host = os.getenv("DESK_HOST", "127.0.0.1")
@@ -848,4 +1023,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import sys
+
+    raise SystemExit(main(sys.argv[1:]))

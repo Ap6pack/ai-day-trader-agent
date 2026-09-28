@@ -61,6 +61,7 @@ class Limits:
     min_price: float = 5.0
     entry_cutoff_minutes: int = 15
     flatten_minutes: int = 10
+    max_symbols: int = 10
 
     @classmethod
     def from_env(cls) -> "Limits":
@@ -71,20 +72,32 @@ class Limits:
             min_price=_env("AUTOPILOT_MIN_PRICE", 5.0),
             entry_cutoff_minutes=int(_env("AUTOPILOT_ENTRY_CUTOFF_MINUTES", 15)),
             flatten_minutes=int(_env("AUTOPILOT_FLATTEN_MINUTES", 10)),
+            max_symbols=max(1, int(_env("AUTOPILOT_MAX_SYMBOLS", 10))),
         )
+
+
+AUTO = "AUTO"
 
 
 @dataclass
 class RunConfig:
+    # Symbols to analyze, or ["AUTO"]: today's in-play stocks from trader.scan
+    # (TRADER_WATCHLIST + Alpaca most-active and movers), refreshed every cycle.
     symbols: List[str]
     interval_seconds: int = 300
     mode: str = "signals"
     portfolio: str = "default"
 
+    @property
+    def auto(self) -> bool:
+        return self.symbols == [AUTO]
+
     def validate(self) -> "RunConfig":
         self.symbols = [s.strip().upper() for s in self.symbols if s and s.strip()][:40]
         if not self.symbols:
-            raise ValueError("Give at least one symbol")
+            raise ValueError("Give at least one symbol, or AUTO for today's in-play stocks")
+        if AUTO in self.symbols and len(self.symbols) > 1:
+            raise ValueError("Use AUTO on its own, or list symbols")
         if not all(s.replace(".", "").isalpha() and len(s) <= 10 for s in self.symbols):
             raise ValueError("Symbols must be letters (and '.')")
         if self.mode not in MODES:
@@ -93,6 +106,13 @@ class RunConfig:
             raise ValueError(f"interval must be {MIN_INTERVAL}-{MAX_INTERVAL} seconds")
         self.interval_seconds = int(self.interval_seconds)
         return self
+
+
+def load_universe() -> List[str]:
+    """Today's in-play stocks, the same list the news bot uses with NEWSBOT_SYMBOLS=auto."""
+    from trader import scan
+
+    return list(scan.build_universe(scan._settings()))
 
 
 def _parse(ts: Any) -> Optional[datetime]:
@@ -116,6 +136,7 @@ class AutoTrader:
         quotes: Callable[[List[str]], Dict[str, Dict[str, Any]]] = market_feed.get_quotes,
         limits: Optional[Limits] = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        universe: Optional[Callable[[], List[str]]] = None,
     ) -> None:
         self.journal = journal
         self.portfolios = portfolios
@@ -125,6 +146,8 @@ class AutoTrader:
         self.quotes = quotes
         self.limits = limits or Limits.from_env()
         self.now = now
+        self.universe = universe or (lambda: load_universe())
+        self.last_universe: List[str] = []
         self.config: Optional[RunConfig] = None
         self.cycles = 0
         self.current_symbol: Optional[str] = None
@@ -150,6 +173,7 @@ class AutoTrader:
             "last_error": self.last_error,
             "trades_today": self.journal.count_events_today(ORDER_EVENT, now=self.now()),
             "limits": asdict(self.limits),
+            "universe": self.last_universe,
         }
 
     async def start(self, config: RunConfig) -> Dict[str, Any]:
@@ -257,10 +281,36 @@ class AutoTrader:
         return self.portfolios.valuation(name, quotes)["equity"], self.portfolios.held(name, symbol), \
             f"portfolio {name}"
 
+    def _held_symbols(self, config: RunConfig) -> List[str]:
+        """Symbols the autopilot holds, so AUTO keeps watching them after they drop out of play."""
+        try:
+            if config.mode == "record" and config.portfolio in self.portfolios.names():
+                return [h["symbol"] for h in self.portfolios.get(config.portfolio)["holdings"]]
+            if config.mode in BROKER_MODES:
+                return sorted(self.broker.owned_positions(ORDER_PREFIX))
+        except Exception as exc:
+            logger.warning(f"Could not list autopilot holdings: {exc}")
+        return []
+
+    def cycle_symbols(self, config: RunConfig) -> List[str]:
+        if not config.auto:
+            return config.symbols
+        try:
+            fresh = [str(s).upper() for s in self.universe()][: self.limits.max_symbols]
+        except Exception as exc:
+            fresh = []
+            self._event("autopilot", None, "error", f"Autopilot universe refresh failed: {exc}")
+        if fresh and fresh != self.last_universe:
+            self._event("autopilot", None, "system",
+                        f"Autopilot universe: {len(fresh)} in-play stocks: {','.join(fresh)}")
+        self.last_universe = fresh or self.last_universe
+        held = [s for s in self._held_symbols(config) if s not in self.last_universe]
+        return held + self.last_universe
+
     def run_cycle(self, config: RunConfig) -> List[Dict[str, Any]]:
         self.cycles += 1
         results = []
-        for symbol in config.symbols:
+        for symbol in self.cycle_symbols(config):
             self.current_symbol = symbol
             self._event("analysis_started", symbol, "info", f"Analysis started for {symbol}")
             try:

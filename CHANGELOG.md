@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- The agents run on their own: `python -m trader.desk` starts the news bot as a
+  supervised process (`trader.supervisor`: restarted with backoff if it stops; setup
+  errors reported, not retried; output in `data/newsbot.log`) and starts the autopilot
+  from `DESK_AUTOPILOT_MODE` / `DESK_AUTOPILOT_SYMBOLS`. The NEWS BOT tab shows the
+  process and has START / STOP BOT. `python -m trader.desk service` prints a systemd
+  user service that keeps the desk and its agents running at boot and after crashes.
+- Autopilot `AUTO` symbols: today's in-play stocks (watchlist + Alpaca most-active and
+  movers, the news bot's list), refreshed each cycle, capped by `AUTOPILOT_MAX_SYMBOLS`,
+  plus the positions it holds.
+- The after-close review may run `trader.status`; status shows the Alpaca account mode.
 - Opt-in real money on Alpaca. `ALPACA_TRADING_BASE_URL=https://api.alpaca.markets`
   plus `ALPACA_LIVE_TRADING=true` (both required; anything else refuses every order).
   Every live buy is checked in `trader.alpaca` against `ALPACA_LIVE_MAX_ORDER_USD`,
