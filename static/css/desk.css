@@ -272,7 +272,15 @@ input::placeholder { color: var(--dim); }
 .tk-est { font-size: 11px; color: var(--muted); }
 .tk-est b { color: var(--text); }
 .tk-msg { font-size: 11px; min-height: 1.3em; }
-.auto .wide { grid-column: 1 / -1; }
+.auto .wide, .ticket .wide { grid-column: 1 / -1; }
+.ph-select { background: transparent; border: 1px solid var(--line-2); color: var(--muted); font: inherit; font-size: 10px; letter-spacing: .06em; padding: 1px 4px; max-width: 150px; }
+.btn-xs { padding: 1px 6px; font-size: 10px; }
+#pos-upl { white-space: nowrap; }
+.badge-live { background: var(--down); color: #000; font-weight: 900; animation: live-pulse 2s ease-in-out infinite; }
+@keyframes live-pulse { 50% { opacity: .65; } }
+.tk-live #tk-sub { color: var(--down); font-weight: 800; }
+#ap-status .btn { margin-bottom: 6px; }
+.sig-meta.muted { color: var(--muted); }
 .ap-status { font-size: 11px; color: var(--muted); }
 /* News bot status panel: one column of key/value rows, note underneath. */
 #ap-status { display: block; overflow-y: auto; }

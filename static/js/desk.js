@@ -1,7 +1,8 @@
 /**
- * ADT Desk — live window onto the agents (Jev news bot, Claude, order guard),
- * with a manual Alpaca paper ticket. Streams quotes, journal activity, the news
- * bot's status and the Alpaca paper account over /ws/desk (python -m trader.desk).
+ * ADT Desk — live window onto the agents (Jev news bot, desk autopilot, Claude,
+ * order guard), with on-demand analysis, local paper portfolios and a manual
+ * ticket. Streams quotes, agent activity, the news bot's and autopilot's status
+ * and the Alpaca paper account over /ws/desk (python -m trader.desk).
  */
 (() => {
   'use strict';
@@ -17,12 +18,26 @@
   const MAX_EVENTS = 400;
   const EVENT_GROUP = {
     news_signal: 'signal', news_skip: 'signal', judgment: 'signal', decision: 'signal',
-    order_submitted: 'order', order_failed: 'order', order_cancelled: 'order', flatten: 'order', guard: 'order',
+    analysis_started: 'signal', strategy_signal: 'signal',
+    order_submitted: 'order', order_failed: 'order', order_cancelled: 'order', order_skipped: 'order',
+    flatten: 'order', guard: 'order',
   };
   const EVENT_TAG = {
     news_signal: 'JEV', news_skip: 'PASS', judgment: 'JUDGE', decision: 'CALL',
-    order_submitted: 'ORDER', order_failed: 'REJ', order_cancelled: 'CXL', flatten: 'FLAT', guard: 'GUARD',
+    analysis_started: 'SCAN', strategy_signal: 'STRAT', analysis_error: 'ERR', autopilot: 'AUTO',
+    order_submitted: 'ORDER', order_failed: 'REJ', order_cancelled: 'CXL', order_skipped: 'SKIP',
+    flatten: 'FLAT', guard: 'GUARD',
   };
+  const MODE_LABEL = { signals: 'SIGNALS ONLY', record: 'LOCAL PORTFOLIO', paper: 'ALPACA PAPER ORDERS', live: 'LIVE ORDERS · REAL MONEY' };
+
+  // An event's call for the signal panel: a full analysis (autopilot / ANALYZE)
+  // or the news bot's headline call. Returns null when the event carries neither.
+  function decisionOf(ev) {
+    const d = ev.data || {};
+    if (d.recommendation) return d.source ? d : { ...d, source: 'autopilot' };
+    if (d.signal && typeof d.signal === 'object') return d.signal;
+    return null;
+  }
 
   const S = {
     config: null,
@@ -39,6 +54,11 @@
     side: 'BUY',
     indicators: store.get('adt_desk_ind', { sma: true, ema: true, vwap: false, levels: true }),
     newsbot: null,
+    autopilot: null,
+    portfolios: [],
+    posSource: store.get('adt_desk_pos', 'alpaca'),
+    pfView: null,
+    autoTab: store.get('adt_desk_autotab', 'pilot'),
     ws: null,
     wsRetry: 0,
     analyzing: new Set(),
@@ -145,6 +165,14 @@
     $('login').hidden = true; $('desk').hidden = false;
     $('logout').hidden = !S.config.auth_required;
     $('demo-badge').hidden = !S.config.demo_mode;
+    $('live-badge').hidden = !isLive();
+    const acctLabel = isLive() ? 'ALPACA LIVE' : 'ALPACA PAPER';
+    $('blotter-sub').textContent = acctLabel;
+    $('pos-src').options[0].textContent = acctLabel;
+    // The autopilot's broker mode must match the account: offer paper or live, not both.
+    const brokerOpt = $('pilot-mode').querySelector('option[value="paper"]');
+    if (isLive() && brokerOpt) { brokerOpt.value = 'live'; brokerOpt.textContent = 'Send LIVE orders — REAL MONEY'; }
+    updateTicketMode();
     if (!S.config.timeframes.includes(S.tf)) S.tf = S.config.default_timeframe;
 
     S.watchlist = store.get('adt_desk_watchlist', null) || S.config.watchlist.slice();
@@ -152,13 +180,18 @@
     syncIndicatorButtons();
     initChart();
     renderWatchlist();
+    setAutoTab(S.autoTab);
     connect();
     loadSymbol(store.get('adt_desk_symbol', null) || S.watchlist[0] || 'SPY');
     refreshAccount();
+    refreshPortfolios();
     if (!S.config.alpaca_configured) {
-      $('tk-msg').innerHTML = '<span class="muted">Set ALPACA_API_KEY / ALPACA_SECRET_KEY to route paper orders.</span>';
+      $('tk-msg').innerHTML = '<span class="muted">Set ALPACA_API_KEY / ALPACA_SECRET_KEY to route Alpaca orders.</span>';
     }
   }
+
+  // The configured Alpaca account is real money (ALPACA_LIVE_TRADING + the live host).
+  const isLive = () => S.config?.account_mode === 'live' && !S.config?.demo_mode;
 
   /* ═══ WebSocket ═══ */
   function setConn(state) {
@@ -208,9 +241,11 @@
     switch (msg.type) {
       case 'hello':
         S.events = msg.data.events || [];
-        S.events.slice().reverse().forEach((e) => { if (e.data?.signal && e.symbol) S.decisions[e.symbol] = e.data.signal; });
+        S.events.slice().reverse().forEach((e) => { const d = decisionOf(e); if (d && e.symbol) S.decisions[e.symbol] = d; });
         renderFeed();
         setNewsbot(msg.data.newsbot);
+        if (msg.data.autopilot) setAutopilot(msg.data.autopilot);
+        if (msg.data.portfolios) setPortfolioNames(msg.data.portfolios);
         if (msg.data.account) setAccount(msg.data.account);
         if (S.decisions[S.symbol]) renderSignal(S.decisions[S.symbol]);
         break;
@@ -218,6 +253,7 @@
       case 'event': onEvent(msg.data); break;
       case 'account': setAccount(msg.data); break;
       case 'newsbot': setNewsbot(msg.data); break;
+      case 'autopilot': setAutopilot(msg.data); break;
     }
   }
 
@@ -532,8 +568,28 @@
     renderLegend();
   }
 
-  /* ═══ Agent signal: the news bot's (or JUDGE's) latest call ═══ */
+  /* ═══ Agent signal: a full analysis (ANALYZE / autopilot) or the news bot's call (JUDGE / bot) ═══ */
+  const isAnalysis = (d) => !!d?.recommendation;
+
   function normalizeDecision(d) {
+    if (isAnalysis(d)) {
+      const signals = d.all_signals || {};
+      const rec = String(d.recommendation).toUpperCase();
+      return {
+        rec: ['BUY', 'SELL'].includes(rec) ? rec : 'HOLD',
+        qty: d.quantity || 0,
+        conf: num(d.confidence) ?? 0,
+        primary: d.primary_strategy,
+        reason: d.primary_reason || d.reason || '',
+        confirming: d.confirming_strategies ?? 0,
+        conflicting: d.conflicting_strategies ?? 0,
+        signals,
+        risk: d.risk_parameters || {},
+        ind: d.technical_indicators || signals.technical?.indicators || {},
+        price: num(d.current_price) ?? num(S.quotes[d.symbol]?.last),
+        ts: d.timestamp,
+      };
+    }
     return {
       rec: d.call === 'BUY' ? 'BUY' : d.call === 'BEARISH' ? 'SELL' : 'HOLD',
       call: d.call || 'NONE',
@@ -547,16 +603,64 @@
 
   function renderSignalEmpty() {
     $('sig-time').textContent = '';
-    $('signal-body').innerHTML = '<div class="empty">No call from the news bot on this symbol yet. Press JUDGE (or type <kbd>SYM JG</kbd>) to have Jev judge its recent headlines with the bot\'s rules.</div>';
+    $('signal-body').innerHTML = '<div class="empty">No call on this symbol yet. Press ANALYZE (<kbd>SYM AN</kbd>) for technical + sentiment + dividend with size, stop/target and risk, or JUDGE (<kbd>SYM JG</kbd>) for the news bot\'s headline call.</div>';
   }
 
-  function renderAnalyzing() {
-    $('signal-body').innerHTML = `<div class="analyzing"><div class="spin"></div>Jev judging recent ${esc(S.symbol)} headlines…</div>`;
+  function renderAnalyzing(kind) {
+    const what = kind === 'judge' ? `Jev judging recent ${esc(S.symbol)} headlines…`
+      : `Analyzing ${esc(S.symbol)} — technical · sentiment · dividend…`;
+    $('signal-body').innerHTML = `<div class="analyzing"><div class="spin"></div>${what}</div>`;
   }
 
   const pct = (v) => (num(v) === null ? '—' : `${Math.round(num(v) * 100)}%`);
+  const fixed = (v, d) => (num(v) === null ? '—' : (+v).toFixed(d));
 
   function renderSignal(d) {
+    return isAnalysis(d) ? renderAnalysis(d) : renderNewsCall(d);
+  }
+
+  function renderAnalysis(d) {
+    const n = normalizeDecision(d);
+    const who = d.source === 'autopilot' ? 'AUTOPILOT' : 'ANALYZE';
+    $('sig-time').textContent = `${who}${n.ts ? ` @ ${etTime(n.ts)} ET` : ''}`;
+    const strat = (name) => {
+      const s = n.signals[name];
+      if (!s) return '';
+      const sig = (s.signal || 'HOLD').toUpperCase();
+      const strength = num(s.strength) ?? 0;
+      return `<div class="strat ${sig} ${name === n.primary ? 'primary' : ''}">
+        <div class="strat-h"><b>${esc(name.toUpperCase())}</b><span class="${sig === 'BUY' ? 'up' : sig === 'SELL' ? 'down' : 'muted'}">${sig}</span>
+          <div class="meter"><i style="width:${Math.round(Math.min(1, strength) * 100)}%"></i></div><span class="muted">${Math.round(strength * 100)}%</span></div>
+        <div class="strat-r" title="${esc(s.reason)}">${esc(s.reason || '—')}</div></div>`;
+    };
+    const r = n.risk, ind = n.ind;
+    $('signal-body').innerHTML = `
+      <div class="sig">
+        <div class="sig-call">
+          <div class="sig-rec ${esc(n.rec)}">${esc(n.rec)}</div>
+          <div class="sig-meta">QTY <b>${num(n.qty) ?? 0}</b> · CONF <b>${Math.round(n.conf * 100)}%</b></div>
+          <div class="meter"><i style="width:${Math.round(n.conf * 100)}%"></i></div>
+          <div class="sig-meta"><b class="up">${n.confirming}</b> confirming · <b class="down">${n.conflicting}</b> conflicting</div>
+          <div class="sig-reason">${esc(n.reason)}</div>
+          ${d.capital_source ? `<div class="sig-meta muted">sized on ${esc(d.capital_source)} ${money(d.capital)}${num(d.held) ? ` · holds ${d.held}` : ''}</div>` : ''}
+        </div>
+        <div class="strats">${['technical', 'sentiment', 'dividend'].map(strat).join('')}</div>
+        <div class="kv">
+          <span>ENTRY</span><b>${px(n.price)}</b>
+          <span>STOP</span><b class="down">${px(r.stop_loss)}</b>
+          <span>TARGET</span><b class="up">${px(r.take_profit)}</b>
+          <span>R:R</span><b>${fixed(r.risk_reward_ratio, 2)}</b>
+          <span>POS VALUE</span><b>${money(r.position_value)}</b>
+          <span>RISK</span><b>${money(r.total_risk)}${num(r.risk_percentage) !== null ? ` · ${(+r.risk_percentage).toFixed(1)}%` : ''}</b>
+          <span>RSI</span><b>${fixed(ind.rsi, 1)}</b>
+          <span>MACD</span><b>${fixed(ind.macd, 3)}</b>
+          <span>SMA20</span><b>${px(ind.sma_20)}</b>
+          <span>EMA20</span><b>${px(ind.ema_20)}</b>
+        </div>
+      </div>`;
+  }
+
+  function renderNewsCall(d) {
     const n = normalizeDecision(d);
     const who = d.source === 'judge' ? 'JUDGE' : 'NEWS BOT';
     $('sig-time').textContent = `${who}${n.ts ? ` @ ${etTime(n.ts)} ET` : ''}`;
@@ -588,34 +692,46 @@
       </div>`;
   }
 
-  async function analyze(sym = S.symbol) {
+  // Size the analysis on what the ticket routes to: a local portfolio, or the Alpaca
+  // paper account when it is connected (otherwise the default local portfolio).
+  function sizingSource() {
+    const dest = $('tk-dest').value || 'alpaca';
+    if (dest !== 'alpaca') return dest;
+    return S.config.alpaca_configured && !S.config.demo_mode ? 'alpaca' : (S.portfolios[0] || 'default');
+  }
+
+  async function analyze(sym = S.symbol, kind = 'analyze') {
     if (!sym || S.analyzing.has(sym)) return;
     S.analyzing.add(sym);
-    if (sym === S.symbol) { renderAnalyzing(); $('analyze-btn').disabled = true; }
+    const buttons = [$('analyze-btn'), $('judge-btn')];
+    if (sym === S.symbol) { renderAnalyzing(kind); buttons.forEach((b) => { b.disabled = true; }); }
     try {
-      S.decisions[sym] = await API.judgeSymbol(sym);
+      S.decisions[sym] = kind === 'judge' ? await API.judgeSymbol(sym) : await API.analyzeSymbol(sym, sizingSource());
     } catch (err) {
       toast(`${sym}: ${err.message}`, 4000);
     } finally {
       S.analyzing.delete(sym);
       if (sym === S.symbol) {
-        $('analyze-btn').disabled = false;
+        buttons.forEach((b) => { b.disabled = false; });
         if (S.decisions[sym]) renderSignal(S.decisions[sym]); else renderSignalEmpty();
         drawLevels();
       }
     }
   }
-  $('analyze-btn').addEventListener('click', () => analyze());
+  $('analyze-btn').addEventListener('click', () => analyze(S.symbol, 'analyze'));
+  $('judge-btn').addEventListener('click', () => analyze(S.symbol, 'judge'));
 
   /* ═══ Activity feed ═══ */
   function onEvent(ev) {
     S.events.unshift(ev);
     if (S.events.length > MAX_EVENTS) S.events.length = MAX_EVENTS;
-    if (ev.data?.signal && ev.symbol && !S.analyzing.has(ev.symbol)) {
-      S.decisions[ev.symbol] = ev.data.signal;
-      if (ev.symbol === S.symbol) { renderSignal(ev.data.signal); drawLevels(); }
+    const call = decisionOf(ev);
+    if (call && ev.symbol && !S.analyzing.has(ev.symbol)) {
+      S.decisions[ev.symbol] = call;
+      if (ev.symbol === S.symbol) { renderSignal(call); drawLevels(); }
     }
-    if (EVENT_GROUP[ev.type] === 'order') refreshAccountSoon();
+    if (EVENT_GROUP[ev.type] === 'order') { refreshAccountSoon(); refreshPortfolioSoon(); }
+    if (ev.type === 'autopilot' || ev.type === 'analysis_started') refreshAutopilotSoon();
     if (matchesFilter(ev)) {
       $('feed').insertAdjacentHTML('afterbegin', eventHtml(ev, true));
       const rows = $('feed').children;
@@ -636,7 +752,7 @@
   function renderFeed() {
     const list = S.events.filter(matchesFilter);
     $('feed').innerHTML = list.length ? list.map((e) => eventHtml(e, false)).join('')
-      : '<div class="empty">Waiting for agent activity… the news bot\'s signals and orders, Claude\'s decisions and guard reviews appear here as they are journaled.</div>';
+      : '<div class="empty">Waiting for agent activity… the news bot\'s and autopilot\'s signals and orders, Claude\'s decisions and guard reviews appear here as they happen.</div>';
   }
 
   $('feed-filter').addEventListener('click', (e) => {
@@ -681,7 +797,10 @@
     S.account = snap;
     if (!snap?.connected) {
       $('t-equity').textContent = '—'; $('t-daypl').textContent = '—'; $('t-bp').textContent = '—';
-      $('pos-body').innerHTML = `<tr><td colspan="6" class="empty">${esc(snap?.message || '—')}</td></tr>`;
+      if (S.posSource === 'alpaca') {
+        $('pos-body').innerHTML = `<tr><td colspan="6" class="empty">${esc(snap?.message || '—')}</td></tr>`;
+        $('pos-upl').innerHTML = '';
+      }
       $('orders-body').innerHTML = `<tr><td colspan="8" class="empty">${esc(snap?.message || '—')}</td></tr>`;
       return;
     }
@@ -691,16 +810,7 @@
     $('t-bp').textContent = money(a.buying_power);
 
     const pos = snap.positions || [];
-    let upl = 0;
-    $('pos-body').innerHTML = pos.length ? pos.map((p) => {
-      upl += p.unrealized_pl || 0;
-      return `<tr data-sym="${esc(p.symbol)}" style="cursor:pointer">
-        <td style="color:var(--amber);font-weight:700">${esc(p.symbol)}</td><td class="r">${p.qty}</td>
-        <td class="r">${px(p.avg_entry_price)}</td><td class="r">${px(p.current_price)}</td>
-        <td class="r ${dir(p.unrealized_pl)}">${money(p.unrealized_pl, true)}</td>
-        <td class="r ${dir(p.unrealized_plpc)}">${signed(p.unrealized_plpc, 2, '%')}</td></tr>`;
-    }).join('') : '<tr><td colspan="6" class="empty">Flat — no open positions</td></tr>';
-    $('pos-upl').innerHTML = pos.length ? `U P&amp;L <span class="${dir(upl)}">${money(upl, true)}</span>` : '';
+    if (S.posSource === 'alpaca') renderPositions(pos);
 
     const orders = snap.orders || [];
     $('orders-body').innerHTML = orders.length ? orders.map((o) => {
@@ -720,10 +830,94 @@
     if ([...now].some((s) => !hadPositions.has(s))) sendWatch();
   }
 
+  function renderPositions(pos, summary) {
+    let upl = 0;
+    $('pos-body').innerHTML = pos.length ? pos.map((p) => {
+      upl += p.unrealized_pl || 0;
+      return `<tr data-sym="${esc(p.symbol)}" style="cursor:pointer">
+        <td style="color:var(--amber);font-weight:700">${esc(p.symbol)}</td><td class="r">${p.qty}</td>
+        <td class="r">${px(p.avg_entry_price)}</td><td class="r">${px(p.current_price)}</td>
+        <td class="r ${dir(p.unrealized_pl)}">${money(p.unrealized_pl, true)}</td>
+        <td class="r ${dir(p.unrealized_plpc)}">${signed(p.unrealized_plpc, 2, '%')}</td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty">Flat — no open positions</td></tr>';
+    $('pos-upl').innerHTML = summary ?? (pos.length ? `U P&amp;L <span class="${dir(upl)}">${money(upl, true)}</span>` : '');
+  }
+
+  /* ═══ Local paper portfolios ═══ */
+  function setPortfolioNames(names) {
+    S.portfolios = names || [];
+    if (S.posSource !== 'alpaca' && !S.portfolios.includes(S.posSource)) S.posSource = 'alpaca';
+    const opts = (sel, first) => {
+      const cur = sel.value;
+      sel.innerHTML = (first || '') + S.portfolios.map((n) => `<option value="${esc(n)}">${esc(first ? n.toUpperCase() : n)}</option>`).join('');
+      if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+    };
+    opts($('pos-src'), `<option value="alpaca">${isLive() ? 'ALPACA LIVE' : 'ALPACA PAPER'}</option>`);
+    $('pos-src').value = S.posSource;
+    const dest = $('tk-dest'), cur = dest.value;
+    dest.innerHTML = `<option value="alpaca">${isLive() ? 'Alpaca LIVE account (real money)' : 'Alpaca paper account'}</option>`
+      + S.portfolios.map((n) => `<option value="${esc(n)}">Local portfolio · ${esc(n)}</option>`).join('');
+    if ([...dest.options].some((o) => o.value === cur)) dest.value = cur;
+    opts($('pilot-portfolio'));
+    if (S.autopilot?.config?.portfolio) $('pilot-portfolio').value = S.autopilot.config.portfolio;
+    updateTicketMode();
+  }
+
+  async function refreshPortfolios() {
+    try {
+      const all = await API.getPortfolios();
+      setPortfolioNames(all.map((p) => p.name));
+      if (S.posSource !== 'alpaca') showPortfolio(all.find((p) => p.name === S.posSource));
+    } catch { /* stream will catch up */ }
+  }
+
+  function showPortfolio(view) {
+    S.pfView = view || null;
+    if (!view) { $('pos-body').innerHTML = '<tr><td colspan="6" class="empty">—</td></tr>'; return; }
+    renderPositions(view.positions || [],
+      `<span title="Cash ${money(view.cash)} · realized ${money(view.realized_pl, true)} · started ${money(view.starting_cash)}">EQ ${money(view.equity)} <span class="${dir(view.total_return_pct)}">${signed(view.total_return_pct, 2, '%')}</span></span>`);
+  }
+
+  async function refreshPortfolio() {
+    if (S.posSource === 'alpaca') return;
+    try { showPortfolio(await API.getPortfolio(S.posSource)); } catch (err) {
+      if (err.status === 404) { setPosSource('alpaca'); refreshPortfolios(); }
+    }
+  }
+  let pfTimer = null;
+  function refreshPortfolioSoon() { clearTimeout(pfTimer); pfTimer = setTimeout(refreshPortfolio, 800); }
+  setInterval(() => { if (!document.hidden) refreshPortfolio(); }, 15000);
+
+  function setPosSource(src) {
+    S.posSource = src;
+    store.set('adt_desk_pos', src);
+    $('pos-src').value = src;
+    if (src === 'alpaca') {
+      if (S.account?.connected) renderPositions(S.account.positions || []); else setAccount(S.account);
+    } else {
+      $('pos-body').innerHTML = '<tr><td colspan="6" class="empty">Loading…</td></tr>';
+      refreshPortfolio();
+    }
+  }
+  $('pos-src').addEventListener('change', (e) => setPosSource(e.target.value));
+
+  $('pf-new').addEventListener('click', async () => {
+    const name = (prompt('New local paper portfolio name (letters, digits, space . _ -):') || '').trim();
+    if (!name) return;
+    const cash = parseFloat(prompt(`Starting cash for "${name}":`, '10000'));
+    if (!(cash > 0)) return toast('Starting cash must be positive');
+    try {
+      await API.createPortfolio(name, cash);
+      await refreshPortfolios();
+      setPosSource(name);
+      toast(`Portfolio ${name} created with ${money(cash)}`);
+    } catch (err) { toast(err.message, 4000); }
+  });
+
   $('pos-body').addEventListener('click', (e) => { const r = e.target.closest('tr[data-sym]'); if (r) loadSymbol(r.dataset.sym); });
   $('orders-body').addEventListener('click', async (e) => {
     const c = e.target.closest('.cancel'); if (!c) return;
-    if (!confirm('Cancel this paper order?')) return;
+    if (!confirm(`Cancel this ${isLive() ? 'LIVE' : 'paper'} order?`)) return;
     try { await API.cancelOrder(c.dataset.id); refreshAccountSoon(); } catch (err) { toast(err.message); }
   });
 
@@ -748,6 +942,7 @@
     $('t-mkt').innerHTML = `<span class="${open ? 'up' : 'down'}">${text}</span>`;
     $('t-mkt-label').textContent = c ? (open ? 'MARKET · CLOSES' : 'MARKET · OPENS') : 'MARKET (EST.)';
     renderNewsbot();
+    if (S.autopilot?.running) renderAutopilotStatus();
   }
   setInterval(tick, 1000);
 
@@ -767,6 +962,14 @@
     const qty = +$('tk-qty').value || 0;
     $('tk-est').textContent = q?.last ? `${money(q.last * qty)} @ ${px(q.last)}` : '—';
   }
+  function updateTicketMode() {
+    const dest = $('tk-dest').value;
+    const live = dest === 'alpaca' && isLive();
+    $('tk-sub').textContent = dest !== 'alpaca' ? `LOCAL · ${dest.toUpperCase()} · AT LAST`
+      : live ? 'LIVE MONEY · MKT · DAY' : 'PAPER · MKT · DAY';
+    $('ticket').closest('.panel').classList.toggle('tk-live', live);
+  }
+  $('tk-dest').addEventListener('change', updateTicketMode);
   $('tk-qty').addEventListener('input', updateTicketEst);
   $('tk-sym').addEventListener('input', updateTicketEst);
 
@@ -775,17 +978,30 @@
     const sym = $('tk-sym').value.trim().toUpperCase();
     const qty = parseInt($('tk-qty').value, 10);
     const msg = $('tk-msg');
-    if (!S.config.alpaca_configured) { msg.innerHTML = '<span class="down">Alpaca keys not configured.</span>'; return; }
-    if (!/^[A-Z]+$/.test(sym) || !(qty > 0)) { msg.innerHTML = '<span class="down">Enter a symbol and quantity.</span>'; return; }
-    if (!confirm(`Send PAPER ${S.side} ${qty} ${sym} at market?`)) return;
+    const dest = $('tk-dest').value || 'alpaca';
+    if (dest === 'alpaca' && !S.config.alpaca_configured) { msg.innerHTML = '<span class="down">Alpaca keys not configured.</span>'; return; }
+    if (!/^[A-Z][A-Z.]{0,9}$/.test(sym) || !(qty > 0)) { msg.innerHTML = '<span class="down">Enter a symbol and quantity.</span>'; return; }
+    const live = dest === 'alpaca' && isLive();
+    if (live) {
+      const lim = S.config.live_limits || {};
+      const typed = prompt(`REAL MONEY: ${S.side} ${qty} ${sym} at market on your LIVE Alpaca account.\n`
+        + `Buys are capped at ${money(lim.max_order_usd)} per order and ${lim.max_orders_per_day ?? '—'} per day.\n\n`
+        + 'Type LIVE to send it.');
+      if ((typed || '').trim().toUpperCase() !== 'LIVE') { msg.innerHTML = '<span class="muted">Not sent.</span>'; return; }
+    } else {
+      const what = dest === 'alpaca' ? `Send PAPER ${S.side} ${qty} ${sym} at market?`
+        : `Record ${S.side} ${qty} ${sym} at the last price in local portfolio "${dest}"?`;
+      if (!confirm(what)) return;
+    }
     $('tk-submit').disabled = true;
     msg.textContent = 'Routing…';
     try {
-      const res = await API.submitPaperOrder(sym, S.side, qty);
-      msg.innerHTML = res.submitted
-        ? `<span class="up">✓ ${esc(res.order?.status || 'submitted').toUpperCase()} · ${esc((res.order?.id || '').slice(0, 8))}</span>`
-        : `<span class="down">${esc(res.skipped_reason || 'Not submitted')}</span>`;
+      const res = await API.submitPaperOrder(sym, S.side, qty, dest, live);
+      msg.innerHTML = !res.submitted ? `<span class="down">${esc(res.skipped_reason || 'Not submitted')}</span>`
+        : res.fill ? `<span class="up">✓ RECORDED @ ${px(res.fill.price)} · cash ${money(res.fill.cash)}</span>`
+        : `<span class="up">✓ ${esc(res.order?.status || 'submitted').toUpperCase()} · ${esc((res.order?.id || '').slice(0, 8))}</span>`;
       refreshAccountSoon();
+      if (dest !== 'alpaca') { if (S.posSource !== dest) setPosSource(dest); else refreshPortfolioSoon(); }
     } catch (err) {
       msg.innerHTML = `<span class="down">${esc(err.message)}</span>`;
     } finally {
@@ -793,7 +1009,90 @@
     }
   });
 
-  /* ═══ News bot (runs on its own; the desk only shows it) ═══ */
+  /* ═══ Autopilot (runs inside the desk server) ═══ */
+  function setAutoTab(tab) {
+    S.autoTab = tab === 'bot' ? 'bot' : 'pilot';
+    store.set('adt_desk_autotab', S.autoTab);
+    const pilot = S.autoTab === 'pilot';
+    $('auto-tabs').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.autoTab));
+    $('pilot-form').hidden = !pilot; $('pilot-state').hidden = !pilot;
+    $('ap-status').hidden = pilot; $('ap-state').hidden = pilot;
+  }
+  $('auto-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tab]'); if (b) setAutoTab(b.dataset.tab);
+  });
+
+  function setAutopilot(status) {
+    S.autopilot = status || null;
+    const running = !!status?.running;
+    $('auto-badge').hidden = !running;
+    $('pilot-state').innerHTML = !running ? 'OFF'
+      : `<span class="${status.config.mode === 'live' ? 'down' : 'up'}">RUNNING · ${esc(status.config.mode.toUpperCase())}</span>`;
+    const btn = $('pilot-toggle');
+    btn.textContent = running ? 'STOP AUTOPILOT' : 'START AUTOPILOT';
+    btn.className = `btn wide ${running ? 'btn-stop' : 'btn-amber'}`;
+    if (running && status.config) {
+      $('pilot-syms').value = status.config.symbols.join(',');
+      $('pilot-interval').value = String(status.config.interval_seconds);
+      $('pilot-mode').value = status.config.mode;
+      if ([...$('pilot-portfolio').options].some((o) => o.value === status.config.portfolio)) $('pilot-portfolio').value = status.config.portfolio;
+    }
+    ['pilot-syms', 'pilot-interval', 'pilot-portfolio', 'pilot-mode'].forEach((id) => { $(id).disabled = running; });
+    renderAutopilotStatus();
+  }
+
+  function renderAutopilotStatus() {
+    const a = S.autopilot;
+    const lim = a?.limits || {};
+    const limits = a ? `Min conf <b>${Math.round((lim.min_confidence ?? 0) * 100)}%</b> · <b>${a.trades_today ?? 0}/${lim.max_trades_per_day ?? '—'}</b> trades today · cooldown ${lim.cooldown_minutes ?? '—'}m` : '';
+    if (!a?.running) {
+      $('pilot-status').innerHTML = `Analyzes each symbol on a timer (technical + Jev sentiment + dividend) and streams every step to ACTIVITY.${limits ? `<br>${limits}` : ''}${a?.last_error ? `<br><span class="down">${esc(a.last_error)}</span>` : ''}`;
+      return;
+    }
+    const doing = a.current_symbol ? `analyzing <b>${esc(a.current_symbol)}</b>` : a.next_cycle_at ? `next cycle in <b>${countdown(a.next_cycle_at)}</b>` : 'starting';
+    const where = a.config.mode === 'record' ? ` → ${esc(a.config.portfolio)}` : '';
+    $('pilot-status').innerHTML = `Cycle <b>${a.cycles}</b> · ${doing} · <b>${MODE_LABEL[a.config.mode] || a.config.mode}</b>${where}<br>${limits}`
+      + (a.last_error ? `<br><span class="down">${esc(a.last_error)}</span>` : '');
+  }
+
+  let pilotTimer = null;
+  function refreshAutopilotSoon() {
+    clearTimeout(pilotTimer);
+    pilotTimer = setTimeout(async () => { try { setAutopilot(await API.getAutopilot()); } catch { /* next event retries */ } }, 400);
+  }
+
+  async function toggleAutopilot(forceOn) {
+    const running = !!S.autopilot?.running;
+    try {
+      if (running && forceOn !== true) { setAutopilot(await API.stopAutopilot()); return; }
+      if (running) return;
+      const symbols = ($('pilot-syms').value.trim() ? $('pilot-syms').value.split(/[\s,]+/) : S.watchlist)
+        .map((x) => x.trim().toUpperCase()).filter(Boolean);
+      const mode = $('pilot-mode').value;
+      if (mode === 'paper' && !confirm(`Autopilot will SEND ALPACA PAPER ORDERS for ${symbols.length} symbols on its own. Continue?`)) return;
+      if (mode === 'live') {
+        const lim = S.config.live_limits || {};
+        const typed = prompt(`REAL MONEY: the autopilot will buy and sell ${symbols.join(', ')} on your LIVE Alpaca account `
+          + `on its own, with no approval per trade.\n`
+          + `Limits: ${money(lim.max_order_usd)} per buy · ${lim.max_orders_per_day ?? '—'} buys/day · `
+          + `buys stop after a ${money(lim.max_daily_loss_usd)} day loss. It only sells shares it bought, `
+          + `and closes them before the market close.\n\nType LIVE to start.`);
+        if ((typed || '').trim().toUpperCase() !== 'LIVE') { toast('Autopilot not started'); return; }
+      }
+      setAutopilot(await API.startAutopilot({
+        symbols,
+        interval_seconds: parseInt($('pilot-interval').value, 10),
+        mode,
+        portfolio: $('pilot-portfolio').value || 'default',
+        confirm_live: mode === 'live',
+      }));
+    } catch (err) {
+      toast(`Autopilot: ${err.message}`, 5000);
+    }
+  }
+  $('pilot-form').addEventListener('submit', (e) => { e.preventDefault(); toggleAutopilot(); });
+
+  /* ═══ News bot (runs on its own; the desk shows it and can pause its trading) ═══ */
   const BOT_ACTIVE_MS = 10 * 60 * 1000;
 
   function setNewsbot(status) {
@@ -805,18 +1104,27 @@
     try { setNewsbot(await API.getNewsbot()); } catch (err) { toast(`News bot: ${err.message}`); }
   }
 
+  async function pauseNewsbot(paused) {
+    try { setNewsbot(await API.pauseNewsbot(paused)); toast(paused ? 'News bot trading paused' : 'News bot trading resumed'); }
+    catch (err) { toast(`News bot: ${err.message}`, 4000); }
+  }
+  $('ap-status').addEventListener('click', (e) => {
+    if (e.target.closest('#bot-pause')) pauseNewsbot(!S.newsbot?.paused);
+  });
+
   function renderNewsbot() {
     const b = S.newsbot;
     if (!b) return;
     const active = b.last_activity && Date.now() - new Date(b.last_activity).getTime() < BOT_ACTIVE_MS;
     $('ap-badge').hidden = !active;
     const mode = (b.execution || '—').toUpperCase();
-    $('ap-state').innerHTML = b.execution === 'paper' ? `<span class="up">${mode}</span>` : mode;
+    $('ap-state').innerHTML = b.paused ? '<span class="down">PAUSED</span>'
+      : b.execution === 'paper' ? `<span class="up">${mode}</span>` : mode;
     const st = b.settings || {};
     const universe = Array.isArray(b.universe) ? b.universe.join(',') : (b.universe || '—').toUpperCase();
     $('ap-status').innerHTML = `
       <div class="kv">
-        <span>MODE</span><b>${b.execution === 'paper' ? 'ALPACA PAPER ORDERS' : 'SIGNALS ONLY'}</b>
+        <span>MODE</span><b>${b.execution === 'paper' ? 'ALPACA PAPER ORDERS' : 'SIGNALS ONLY'}${b.paused ? ' · <span class="down">PAUSED</span>' : ''}</b>
         <span>STOCKS</span><b title="${esc(universe)}">${esc(universe.length > 28 ? universe.slice(0, 28) + '…' : universe)}</b>
         <span>TRADES TODAY</span><b>${b.orders_today ?? 0} / ${b.max_trades_per_day ?? '—'}</b>
         <span>SIGNALS TODAY</span><b>${b.signals_today ?? 0}</b>
@@ -826,7 +1134,8 @@
         <span>PER TRADE</span><b>${money(st.order_usd)} · TP ${st.take_profit_pct ?? '—'}% · SL ${st.stop_loss_pct ?? '—'}%</b>
         <span>COOLDOWN</span><b>${st.cooldown_minutes ?? '—'} min · cutoff ${st.entry_cutoff_minutes ?? '—'} min</b>
       </div>
-      <div class="muted small">${active ? '' : 'No bot activity in the last 10 min. '}The bot runs on its own (python -m trader.newsbot run); change its rules in .env.</div>`;
+      <button class="btn wide ${b.paused ? 'btn-amber' : 'btn-stop'}" id="bot-pause" type="button">${b.paused ? 'RESUME BOT TRADING' : 'PAUSE BOT TRADING'}</button>
+      <div class="muted small">${active ? '' : 'No bot activity in the last 10 min. '}${b.paused ? 'Paused: the bot keeps judging and journaling headlines but places no orders. ' : ''}The bot runs on its own (python -m trader.newsbot run); change its rules in .env.</div>`;
   }
 
   /* ═══ Command line ═══ */
@@ -837,8 +1146,24 @@
     const tfAlias = { '1M': '1Min', '5M': '5Min', '15M': '15Min', '1H': '1Hour', '1D': '1Day' };
     if (a === 'HELP' || a === '?') { $('help').hidden = false; return; }
     if (tfAlias[a]) return setTimeframe(tfAlias[a]);
-    if (['AN', 'ANALYZE', 'JG', 'JUDGE'].includes(a)) return analyze(b || S.symbol);
-    if (a === 'BOT') return refreshNewsbot();
+    const kindOf = (w) => (['JG', 'JUDGE'].includes(w) ? 'judge' : 'analyze');
+    if (['AN', 'ANALYZE', 'JG', 'JUDGE'].includes(a)) return analyze(b || S.symbol, kindOf(a));
+    if (a === 'AP' || a === 'AUTO' || a === 'AUTOPILOT') {
+      setAutoTab('pilot');
+      if (b === 'ON') return toggleAutopilot(true);
+      if (b === 'OFF') return S.autopilot?.running && toggleAutopilot();
+      return toggleAutopilot();
+    }
+    if (a === 'BOT') {
+      setAutoTab('bot');
+      if (b === 'PAUSE') return pauseNewsbot(true);
+      if (b === 'RESUME') return pauseNewsbot(false);
+      return refreshNewsbot();
+    }
+    if (a === 'PF' && b) {
+      const name = b === 'ALPACA' ? 'alpaca' : S.portfolios.find((n) => n.toUpperCase() === parts.slice(1).join(' '));
+      return name ? setPosSource(name) : toast(`No portfolio ${parts.slice(1).join(' ')}`);
+    }
     if (a === 'ADD' && b) return addWatch(b);
     if ((a === 'DEL' || a === 'RM') && b) return removeWatch(b);
     if ((a === 'BUY' || a === 'SELL') && b) {
@@ -850,7 +1175,7 @@
       return;
     }
     loadSymbol(a);
-    if (['AN', 'ANALYZE', 'JG', 'JUDGE'].includes(b)) analyze(a);
+    if (['AN', 'ANALYZE', 'JG', 'JUDGE'].includes(b)) analyze(a, kindOf(b));
   }
 
   $('cmd-form').addEventListener('submit', (e) => {

@@ -14,12 +14,16 @@ what those tools do not provide:
   strategy works before risking money.
 - **A playbook** (`.claude/skills/day-trader`) that tells Claude how to analyze, size,
   review and journal a trade.
-- **A news bot** (`trader.newsbot`) that trades Alpaca's news stream on its own, on the
-  Alpaca **paper** account only: Jev judges each headline, rules in code decide, and a
-  bracket order (entry, stop, target) goes in with no approval step.
+- **A news bot** (`trader.newsbot`) that trades Alpaca's news stream on its own: Jev
+  judges each headline, rules in code decide, and a bracket order (entry, stop, target)
+  goes in with no approval step. Paper by default; real money only if you opt in
+  (see [Real money](#real-money-alpaca-live)).
+- **A live desk** (`trader.desk`) that shows all of it as it happens, runs the
+  technical + sentiment + dividend analysis on demand, switches the desk autopilot and
+  the news bot's trading on and off, and keeps local paper portfolios.
 
-The previous standalone version (multi-provider data fetching, FastAPI server, web
-dashboard, dividend capture engine) is preserved under the `v1-legacy` tag.
+The previous standalone version (multi-provider data fetching, the original FastAPI
+server) is preserved under the `v1-legacy` tag.
 
 ## How it fits together
 
@@ -36,7 +40,9 @@ you ──► Claude Code ──► Robinhood MCP tools (quotes, indicators, acc
 
 browser ──► python -m trader.desk ──► live view of all of the above: quotes and charts,
                                       the bot's signals/orders, Claude's decisions, guard
-                                      reviews, the Alpaca paper account; JUDGE; manual paper ticket
+                                      reviews, the Alpaca paper account; ANALYZE and JUDGE;
+                                      the desk autopilot (on/off); local paper portfolios;
+                                      manual ticket
 ```
 
 ## Setup
@@ -145,6 +151,45 @@ After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, 
 - `run` (optional) has Claude analyze the scan shortlist in review mode.
 - `check` shows the setup and the MCP server names Claude Code sees.
 
+## Real money (Alpaca live)
+
+Everything runs on the Alpaca **paper** account unless you opt in. To trade real money:
+
+```bash
+# .env: both are required; either one alone refuses every order
+ALPACA_TRADING_BASE_URL=https://api.alpaca.markets
+ALPACA_LIVE_TRADING=true
+# Your LIVE account's keys (Alpaca issues separate keys for paper and live)
+ALPACA_API_KEY=...
+ALPACA_SECRET_KEY=...
+```
+
+Then each agent opts in on its own:
+
+- **News bot**: `NEWSBOT_EXECUTION=live`. `paper` or `live` must match the account, or
+  `run` refuses to start.
+- **Desk ticket**: the desk shows a red **LIVE MONEY** badge, and every order must be
+  confirmed by typing `LIVE`.
+- **Desk autopilot**: the AUTOPILOT tab offers *Send LIVE orders — REAL MONEY* instead
+  of paper orders, and starting it needs you to type `LIVE`. It sizes on the live
+  account's equity, caps each buy at `ALPACA_LIVE_MAX_ORDER_USD`, only sells shares it
+  bought itself, and closes its own positions `AUTOPILOT_FLATTEN_MINUTES` before the
+  close (as it now does in paper mode too).
+
+Hard limits on every live buy, checked in `trader.alpaca` at the moment of sending, so
+no agent can skip them: `ALPACA_LIVE_MAX_ORDER_USD` (default $500 per order),
+`ALPACA_LIVE_MAX_ORDERS_PER_DAY` (default 3) and `ALPACA_LIVE_MAX_DAILY_LOSS_USD`
+(default $200; new buys stop for the day once the account is down that much). Sells
+are never blocked, so you can always get out.
+
+Your own holdings are safe: on a live account the news bot and the autopilot only sell
+and flatten shares they bought that day (tracked by their order ids), never positions
+you already hold, and "close every position" is paper only.
+
+Start small, watch the desk, and run `python -m trader.newsbot replay SYMBOL` on recent
+headlines first. Robinhood real-money trading is separate: it goes through Claude Code
+with `TRADER_MODE=live` and the order guard (see above).
+
 ## Live trading desk
 
 ![Live trading desk](docs/images/live-desk.png)
@@ -153,22 +198,42 @@ After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, 
 python -m trader.desk          # then open http://127.0.0.1:8000/desk
 ```
 
-The desk is the window onto the agents. Everything streams live:
+The desk is the window onto the agents, and lets you switch the automation on and off.
+Everything streams live:
 
 - **Agent activity**: every headline the news bot judged (with Jev's probabilities and
   latency, and why it traded or passed), its bracket orders and the end-of-day flatten,
-  Claude's decisions and the order guard's reviews, read from the journal as they are
-  written.
-- **Agent signal**: the bot's latest call on the loaded symbol, with entry, stop and
-  target drawn on the chart. **JUDGE** (or `SYM JG`) has Jev judge the symbol's recent
-  headlines with the bot's own rules, so you see what it would decide.
-- **News bot panel**: mode, today's stocks, trades against the daily cap, latency and
-  rules. The bot runs on its own; change its rules in `.env`.
+  every step of the desk autopilot (each strategy's signal, the call, orders and why an
+  order was skipped), Claude's decisions and the order guard's reviews.
+- **Agent signal**: the latest call on the loaded symbol, with entry, stop and target
+  drawn on the chart.
+  - **ANALYZE** (or `SYM AN`): the multi-strategy view. Technical (RSI, MACD, price
+    against SMA20/EMA20), Jev sentiment on recent headlines and dividend capture are
+    combined into BUY / SELL / HOLD with a confidence, then sized: quantity, ATR stop
+    and target, risk/reward, position value and the dollars and percent at risk. It is
+    sized on where the ticket routes (a local portfolio or the Alpaca paper account).
+  - **JUDGE** (or `SYM JG`): Jev judges the symbol's recent headlines with the news
+    bot's own rules, so you see what the bot would decide.
+- **AUTOPILOT tab**: start and stop hands-off trading from the desk. Pick the symbols
+  (the watchlist by default), how often (1 min to 1 hr) and the mode: *signals only*,
+  *record trades in a local portfolio*, or *send Alpaca paper orders* (bracket buys with
+  the analysis's stop and target, market sells of held shares; long only). Limits from
+  `AUTOPILOT_*` apply before every trade: minimum confidence, daily cap, per-symbol
+  cooldown, minimum price and no entries near the close. `AP ON` / `AP OFF` also work.
+- **NEWS BOT tab**: mode, today's stocks, trades against the daily cap, latency and
+  rules, and a **PAUSE / RESUME** switch. Paused, the bot keeps judging and journaling
+  headlines but places no orders. The bot itself runs on its own; change its rules in
+  `.env`.
+- **Local paper portfolios**: simulated accounts with cash, holdings and P&L, kept in the
+  journal database. Create as many as you like (**+ PORTFOLIO**, or
+  `python -m trader.portfolios create NAME --cash 10000`) to compare approaches, view one
+  in POSITIONS, route the ticket to it, or have the autopilot record into it.
 - **Market and account**: watchlist, ticker tape and candlestick chart (Alpaca, or
   `DESK_DEMO_MODE=true` for simulated data), news, and the Alpaca paper account's
-  equity, positions and orders (tagged bot or manual).
-- **Manual paper ticket**: market orders to the Alpaca paper account only. They are
-  journaled as desk orders, so the daily review can tell them apart from the bot's.
+  equity, positions and orders (tagged bot, autopilot or manual).
+- **Manual ticket**: market orders to the Alpaca paper account, or a fill recorded at the
+  last price in a local portfolio. Manual orders are journaled as desk orders, so the
+  daily review can tell them apart from the agents'.
 
 It binds to `127.0.0.1`. To open it from another machine set `DESK_TOKEN` and
 `DESK_HOST`; the desk refuses a non-local bind without a token.
@@ -185,6 +250,8 @@ It binds to `127.0.0.1`. To open it from another machine set `DESK_TOKEN` and
 | `python -m trader.newsbot run` / `replay SYMBOL [--hours H]` / `flatten` | Autonomous Alpaca paper news bot |
 | `python -m trader.autopilot score` / `review` / `run` / `check` / `cron` | Claude's scheduled runs |
 | `python -m trader.desk` | Live trading desk at http://127.0.0.1:8000/desk |
+| `python -m trader.analysis SYMBOL [--capital C] [--held N]` | Technical + sentiment + dividend analysis with sizing and risk |
+| `python -m trader.portfolios list` / `create NAME [--cash C]` / `show NAME` / `delete NAME` | Local paper portfolios |
 
 ## Tests
 

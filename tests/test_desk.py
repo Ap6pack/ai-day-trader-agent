@@ -20,7 +20,7 @@ def journal(tmp_path):
 @pytest.fixture
 def env(monkeypatch):
     for name in ("DESK_TOKEN", "DESK_DEMO_MODE", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TYPESAFE_API_KEY",
-                 "NEWSBOT_SYMBOLS", "NEWSBOT_EXECUTION", "ALPACA_TRADING_BASE_URL"):
+                 "NEWSBOT_SYMBOLS", "NEWSBOT_EXECUTION", "ALPACA_TRADING_BASE_URL", "ALPACA_LIVE_TRADING"):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
 
@@ -211,7 +211,7 @@ def test_manual_order_is_paper_only_and_journaled(env, journal, monkeypatch):
 
         env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
         refused = c.post("/api/desk/orders", json={"symbol": "NVDA", "side": "buy", "qty": 1})
-        assert refused.status_code == 400 and "paper" in refused.json()["detail"]
+        assert refused.status_code == 400 and "usable" in refused.json()["detail"]
         assert len(sent) == 1
 
 
@@ -251,17 +251,158 @@ def test_account_snapshot_marks_order_origin(env, monkeypatch):
     monkeypatch.setattr(desk.alpaca, "orders", lambda limit: [
         {"id": "1", "client_order_id": "newsbot-x", "symbol": "NVDA", "status": "filled"},
         {"id": "2", "client_order_id": "desk-y", "symbol": "AMD", "status": "new"},
+        {"id": "3", "client_order_id": "autopilot-z", "symbol": "TSLA", "status": "new"},
     ])
     monkeypatch.setattr(desk.alpaca, "market_clock", lambda: {"is_open": True})
     snap = desk.account_snapshot()
     assert snap["connected"] and snap["account"]["day_pl"] == 100.0
     assert snap["positions"][0]["unrealized_plpc"] == pytest.approx(1.2)
-    assert [o["origin"] for o in snap["orders"]] == ["bot", "desk"]
+    assert [o["origin"] for o in snap["orders"]] == ["bot", "desk", "autopilot"]
 
 
-def test_account_snapshot_refuses_live_endpoint(env):
+def test_account_snapshot_refuses_live_endpoint_without_opt_in(env):
     env.setenv("ALPACA_API_KEY", "k")
     env.setenv("ALPACA_SECRET_KEY", "s")
     env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
     snap = desk.account_snapshot()
-    assert snap["connected"] is False and "paper" in snap["message"]
+    assert snap["connected"] is False and "not a usable" in snap["message"]
+
+
+# --- analysis, autopilot, portfolios, pause ----------------------------------------------
+
+
+def fake_analysis(symbol="NVDA", rec="BUY", qty=5):
+    return {"symbol": symbol, "timestamp": NOW.isoformat(), "recommendation": rec, "quantity": qty,
+            "confidence": 0.7, "primary_strategy": "technical", "current_price": 100.0,
+            "all_signals": {}, "risk_parameters": {"stop_loss": 96.0, "take_profit": 106.0}}
+
+
+def test_analyze_uses_portfolio_capital_and_streams_a_decision(env, journal, monkeypatch):
+    calls = []
+
+    def analyze(symbol, capital, held, capital_source):
+        calls.append((symbol, capital, held, capital_source))
+        return fake_analysis(symbol)
+
+    monkeypatch.setattr(desk.analysis, "analyze", analyze)
+    app = desk.create_app(journal=journal, background=False)
+    with TestClient(app) as c:
+        c.post("/api/desk/portfolios", json={"name": "fast", "cash": 2000})
+        res = c.post("/api/desk/analyze/nvda?portfolio=fast").json()
+        assert res["recommendation"] == "BUY"
+        assert calls == [("NVDA", 2000, 0.0, "portfolio fast")]
+        assert c.post("/api/desk/analyze/nvda?portfolio=nope").status_code == 404
+        assert c.post("/api/desk/analyze/nvda?portfolio=alpaca").status_code == 400
+        assert c.post("/api/desk/analyze/bad sym").status_code == 400
+        with c.websocket_connect("/ws/desk") as ws:
+            hello = ws.receive_json()["data"]
+            assert hello["events"][0]["type"] == "decision" and hello["events"][0]["data"]["quantity"] == 5
+            assert hello["portfolios"] == ["default", "fast"]
+            assert hello["autopilot"]["running"] is False
+
+
+def test_portfolio_crud_and_manual_fills(env, journal):
+    app = desk.create_app(journal=journal, background=False)
+    app.state.hub.last_quotes["NVDA"] = {"last": 100.0}
+    with TestClient(app) as c:
+        assert [p["name"] for p in c.get("/api/desk/portfolios").json()] == ["default"]
+        assert c.post("/api/desk/portfolios", json={"name": "swing", "cash": 1000}).json()["equity"] == 1000
+        assert c.post("/api/desk/portfolios", json={"name": "swing", "cash": 1000}).status_code == 400
+        res = c.post("/api/desk/orders", json={"symbol": "NVDA", "side": "buy", "qty": 4,
+                                               "destination": "swing"}).json()
+        assert res["submitted"] and res["fill"]["cash"] == 600
+        view = c.get("/api/desk/portfolios/swing").json()
+        assert view["positions"][0]["qty"] == 4 and view["fills"][0]["source"] == "desk"
+        too_much = c.post("/api/desk/orders", json={"symbol": "NVDA", "side": "buy", "qty": 40,
+                                                    "destination": "swing"}).json()
+        assert too_much["submitted"] is False and "Not enough cash" in too_much["skipped_reason"]
+        assert journal.events(1)[0]["kind"] == desk.DESK_ORDER_EVENT
+        assert c.delete("/api/desk/portfolios/swing").json() == {"deleted": "swing"}
+        assert c.get("/api/desk/portfolios/swing").status_code == 404
+
+
+def test_autopilot_start_status_stop(env, journal, monkeypatch):
+    monkeypatch.setattr(desk.analysis, "analyze", lambda *a, **k: fake_analysis(rec="HOLD", qty=0))
+    with client_for(journal) as c:
+        bad = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 10, "mode": "signals"})
+        assert bad.status_code == 422
+        unknown = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60, "mode": "real"})
+        assert unknown.status_code == 422
+        missing = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60,
+                                                      "mode": "record", "portfolio": "nope"})
+        assert missing.status_code == 400
+        started = c.post("/api/desk/autopilot", json={"symbols": ["nvda"], "interval_seconds": 300,
+                                                      "mode": "signals"}).json()
+        assert started["running"] and started["config"]["symbols"] == ["NVDA"]
+        assert c.get("/api/desk/autopilot").json()["running"]
+        assert c.delete("/api/desk/autopilot").json()["running"] is False
+
+
+def test_newsbot_pause_from_the_desk(env, journal, tmp_path):
+    env.setenv("TRADER_JOURNAL_PATH", str(tmp_path / "desk.db"))
+    with client_for(journal) as c:
+        assert c.post("/api/desk/newsbot/pause", json={"paused": True}).json()["paused"] is True
+        assert newsbot.is_paused()
+        assert c.get("/api/desk/newsbot").json()["paused"] is True
+        assert c.post("/api/desk/newsbot/pause", json={"paused": False}).json()["paused"] is False
+        assert not newsbot.is_paused()
+
+
+def test_autopilot_rows_are_not_streamed_twice(env, journal):
+    import asyncio
+
+    hub = desk.Hub(journal)
+    sent = []
+
+    async def run():
+        async def fake_broadcast(message):
+            sent.append(message)
+
+        hub.broadcast = fake_broadcast
+        journal.log_event(desk.autotrader.ORDER_EVENT, tool="autopilot", symbol="NVDA", detail="x", now=NOW)
+        journal.add_decision("NVDA", "buy", 100.0, thesis="[autopilot] t", mode="autopilot-paper", now=NOW)
+        assert await hub.poll_journal() == 0
+
+    asyncio.run(run())
+    assert sent == []
+    row = journal.events(1)[0]
+    assert desk.journal_event(row)["message"].startswith("AUTO")
+    assert desk.decision_event(journal.decisions(1)[0])["message"].startswith("AUTO BUY")
+
+
+def test_live_account_orders_need_explicit_confirmation(env, journal, monkeypatch):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+    env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    env.setenv("ALPACA_LIVE_TRADING", "true")
+    sent = []
+    monkeypatch.setattr(desk.alpaca, "submit_order", lambda p: sent.append(p) or {"id": "live-1234567", "status": "accepted"})
+    with client_for(journal) as c:
+        cfg = c.get("/api/desk/config").json()
+        assert cfg["account_mode"] == "live" and cfg["live_limits"]["max_order_usd"] == 500
+        body = {"symbol": "NVDA", "side": "buy", "qty": 1}
+        unconfirmed = c.post("/api/desk/orders", json=body)
+        assert unconfirmed.status_code == 400 and "LIVE" in unconfirmed.json()["detail"] and sent == []
+        assert c.post("/api/desk/orders", json={**body, "confirm_live": True}).json()["submitted"] is True
+        assert len(sent) == 1
+        event = journal.events(1)[0]
+        assert event["detail"].startswith("LIVE ") and '"account": "live"' in event["payload"]
+        # The autopilot's broker modes stay paper: it refuses to start on a live account.
+        refused = c.post("/api/desk/autopilot", json={"symbols": ["NVDA"], "interval_seconds": 60, "mode": "paper"})
+        assert refused.status_code == 400
+
+
+def test_live_autopilot_needs_confirmation(env, journal, monkeypatch):
+    env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    env.setenv("ALPACA_LIVE_TRADING", "true")
+    monkeypatch.setattr(desk.analysis, "analyze", lambda *a, **k: fake_analysis(rec="HOLD", qty=0))
+    body = {"symbols": ["NVDA"], "interval_seconds": 300, "mode": "live"}
+    with client_for(journal) as c:
+        refused = c.post("/api/desk/autopilot", json=body)
+        assert refused.status_code == 400 and "REAL MONEY" in refused.json()["detail"]
+        started = c.post("/api/desk/autopilot", json={**body, "confirm_live": True}).json()
+        assert started["running"] and started["config"]["mode"] == "live"
+        assert c.delete("/api/desk/autopilot").json()["running"] is False
+    env.delenv("ALPACA_LIVE_TRADING")
+    with client_for(journal) as c:  # without the opt-in the account is unusable: live refuses
+        assert c.post("/api/desk/autopilot", json={**body, "confirm_live": True}).status_code == 400

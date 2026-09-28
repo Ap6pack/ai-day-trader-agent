@@ -1,14 +1,17 @@
 """
-Autonomous news trading on Alpaca paper (docs/PLAN.md, Phase 3).
+Autonomous news trading on Alpaca: paper by default, real money by opt-in.
 
 Alpaca's real-time news stream feeds each headline to Jev (one request per
 headline and symbol); plain rules in code turn the judgment into a signal, and
-a bullish signal that passes the hard limits becomes a paper bracket order
+a bullish signal that passes the hard limits becomes a bracket order
 (market entry, take-profit limit, stop-loss). There is no approval step.
 
 Safety:
   * NEWSBOT_EXECUTION=off (the default) journals signals only; `paper` places
-    orders. Order functions in trader.alpaca refuse any non-paper base URL.
+    Alpaca paper orders; `live` places REAL-MONEY orders. The mode must match
+    the configured account (trader.alpaca: live needs ALPACA_LIVE_TRADING=true
+    and the live host), or the bot refuses to start. Live buys also pass the
+    ALPACA_LIVE_* limits, and live flattening closes only the bot's own shares.
   * Long only: bearish signals are journaled as `sell` decisions, never shorted.
   * Limits from .env: size per trade, trades per day, per-symbol cooldown,
     minimum price, no new entries close to the close, bracket on every order.
@@ -17,7 +20,7 @@ Safety:
 
     python -m trader.newsbot run                   # stream and trade
     python -m trader.newsbot replay AAPL --hours 24  # apply the rules to recent headlines
-    python -m trader.newsbot flatten               # close all paper positions
+    python -m trader.newsbot flatten               # paper: close all; live: close the bot's own
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
 
 from trader import alpaca, config, jev_news
@@ -45,7 +49,8 @@ from trader.scan import SYMBOL_RE
 logger = logging.getLogger(__name__)
 
 STREAM_URL = "wss://stream.data.alpaca.markets/v1beta1/news"
-EXECUTION_MODES = ("off", "paper")
+EXECUTION_MODES = ("off", "paper", "live")
+ORDER_PREFIX = "newsbot-"
 ORDER_EVENT = "newsbot_order"
 SIGNAL_EVENT = "newsbot_signal"
 FLATTEN_EVENT = "newsbot_flatten"
@@ -226,6 +231,25 @@ def _load_universe() -> List[str]:
 # --- bot --------------------------------------------------------------------
 
 
+def pause_flag() -> "Path":
+    """Flag file next to the journal: while it exists the bot judges and journals but places no orders."""
+    return config.journal_path().with_name("newsbot.paused")
+
+
+def is_paused() -> bool:
+    return pause_flag().exists()
+
+
+def set_paused(paused: bool) -> bool:
+    flag = pause_flag()
+    if paused:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    else:
+        flag.unlink(missing_ok=True)
+    return is_paused()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -331,11 +355,12 @@ class NewsBot:
             return self._log(ORDER_EVENT, symbol, record, received_at, side=side, qty=qty)
 
     def maybe_flatten(self) -> Optional[Dict[str, Any]]:
-        """Close every paper position once per session, NEWSBOT_FLATTEN_MINUTES before the close.
+        """Close positions once per session, NEWSBOT_FLATTEN_MINUTES before the close:
+        every position on paper, only the bot's own shares on a live account.
 
         Bracket legs are day orders: a position still open at the close would be
         held overnight with no stop. Failures are retried on the next check."""
-        if self.settings.execution != "paper":
+        if self.settings.execution == "off":
             return None
         try:
             clock = self.market_clock()
@@ -348,7 +373,8 @@ class NewsBot:
         if next_close - self.now() > timedelta(minutes=self.settings.flatten_minutes):
             return None
         with self._order_lock:
-            closed = self.broker.close_all_positions()
+            closed = (self.broker.flatten_owned(ORDER_PREFIX) if self.settings.execution == "live"
+                      else self.broker.close_all_positions())
             self._flattened_for = clock["next_close"]
         detail = f"closed {len(closed)} positions before the {clock['next_close']} close"
         self.journal.log_event(FLATTEN_EVENT, tool="newsbot", detail=detail,
@@ -358,8 +384,10 @@ class NewsBot:
 
     def _check_limits(self, symbol: str, price: float) -> "tuple[Optional[str], int]":
         s = self.settings
-        if s.execution != "paper":
+        if s.execution == "off":
             return "execution off (NEWSBOT_EXECUTION=off): signal journaled only", 0
+        if is_paused():
+            return "trading paused from the desk (signals still journaled)", 0
         try:
             clock = self.market_clock()
         except Exception as exc:
@@ -384,6 +412,8 @@ class NewsBot:
         if price < s.min_price:
             return f"price ${price:.2f} below NEWSBOT_MIN_PRICE (${s.min_price:.2f})", 0
         qty = math.floor(s.order_usd / price)
+        if s.execution == "live":
+            qty = min(qty, alpaca.max_live_qty(price))
         if qty < 1:
             return f"NEWSBOT_ORDER_USD ${s.order_usd:.2f} buys less than one share at ${price:.2f}", 0
         return None, qty
@@ -554,10 +584,16 @@ def run(settings: Settings) -> int:
     if not jev_news.is_configured():
         print("TYPESAFE_API_KEY is required: Jev judges every headline.", file=sys.stderr)
         return 2
-    if settings.execution == "paper" and not alpaca.is_paper():
-        print(f"NEWSBOT_EXECUTION=paper but ALPACA_TRADING_BASE_URL is {alpaca.trading_base_url()!r}; "
-              f"the news bot trades {alpaca.DEFAULT_TRADING_URL} only.", file=sys.stderr)
-        return 2
+    if settings.execution != "off":
+        try:
+            alpaca.require_mode(settings.execution, who=f"NEWSBOT_EXECUTION={settings.execution}")
+        except alpaca.AccountError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if settings.execution == "live":
+            limits = alpaca.LiveLimits.from_env()
+            logger.warning(f"LIVE TRADING: the news bot will place REAL-MONEY orders (max ${limits.max_order_usd:,.0f} "
+                           f"per buy, {limits.max_orders_per_day} buys/day, stop after -${limits.max_daily_loss_usd:,.0f})")
     bot = NewsBot(settings)
     with ThreadPoolExecutor(max_workers=HANDLER_WORKERS) as executor:
         try:
@@ -597,7 +633,7 @@ def replay(symbol: str, hours: float, settings: Settings) -> int:
 
 
 def flatten() -> int:
-    closed = alpaca.close_all_positions()
+    closed = alpaca.flatten_owned(ORDER_PREFIX) if alpaca.is_live() else alpaca.close_all_positions()
     Journal().log_event(FLATTEN_EVENT, tool="newsbot", detail=f"closed {len(closed)} positions",
                         payload={"response": closed})
     print(json.dumps({"closed": len(closed), "response": closed}, indent=2, default=str))
@@ -608,11 +644,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     config.load_env()
     parser = argparse.ArgumentParser(prog="python -m trader.newsbot")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("run", help="Stream Alpaca news and trade it (paper) per NEWSBOT_* settings")
+    sub.add_parser("run", help="Stream Alpaca news and trade it per NEWSBOT_* settings")
     rp = sub.add_parser("replay", help="Apply the rules to recent headlines; never trades or journals")
     rp.add_argument("symbol")
     rp.add_argument("--hours", type=float, default=24)
-    sub.add_parser("flatten", help="Cancel open orders and close all Alpaca paper positions")
+    sub.add_parser("flatten", help="Paper: close all positions. Live: close only the bot's own shares")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         stream=sys.stderr)

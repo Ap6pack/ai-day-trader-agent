@@ -7,6 +7,34 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Opt-in real money on Alpaca. `ALPACA_TRADING_BASE_URL=https://api.alpaca.markets`
+  plus `ALPACA_LIVE_TRADING=true` (both required; anything else refuses every order).
+  Every live buy is checked in `trader.alpaca` against `ALPACA_LIVE_MAX_ORDER_USD`,
+  `ALPACA_LIVE_MAX_ORDERS_PER_DAY` and `ALPACA_LIVE_MAX_DAILY_LOSS_USD`; sells always
+  pass. `NEWSBOT_EXECUTION=live` lets the news bot trade it (the mode must match the
+  account); on live it flattens only the shares it bought (`flatten_owned`), and
+  `close_all_positions` is paper only. The desk shows the live account with a LIVE
+  MONEY badge and requires typing LIVE for each ticket order. The desk autopilot has a
+  `live` mode (typing LIVE to start): it sizes on live equity, caps buys at the live
+  per-order limit and only sells shares it bought. In paper and live modes it now
+  closes its own positions `AUTOPILOT_FLATTEN_MINUTES` before the close.
+- Features from the original desk (PR #5), rebuilt on the new app:
+  - `trader.analysis`: the multi-strategy analysis. `trader.technicals` (RSI, MACD,
+    SMA/EMA, ATR) gives the technical signal with the original rules, Jev's headline
+    judgments give sentiment, and `trader.dividends` gives dividend capture from Alpaca
+    corporate actions. They are fused into BUY / SELL / HOLD with a confidence, then
+    sized (quantity, ATR stop and target, risk/reward, position value, risk). The desk's
+    **ANALYZE** button (`SYM AN`) shows it with the original signal panel.
+  - `trader.portfolios`: any number of local paper portfolios (cash, holdings, average
+    price, realized and unrealized P&L) in the journal database. The desk can create
+    them, show one in POSITIONS and route the ticket to it.
+  - `trader.autotrader`: the desk autopilot, started and stopped from the desk's
+    AUTOPILOT tab (`AP ON` / `AP OFF`): chosen symbols, every 1 min to 1 hr, in signals,
+    record-to-portfolio or Alpaca paper order mode, with `AUTOPILOT_*` limits (minimum
+    confidence, daily cap, cooldown, minimum price, entry cutoff). Every step streams to
+    the activity feed; decisions and orders are journaled.
+  - News bot pause: the desk's NEWS BOT tab can pause and resume the bot's trading
+    (`BOT PAUSE` / `BOT RESUME`); while paused it keeps judging and journaling headlines.
 - `trader.desk`: the live trading desk (from PR #5) rebuilt on the new app and served by
   `python -m trader.desk`. Its front end (chart, watchlist, tape, news, positions,
   blotter, command line) is kept; it now streams the journal (news bot signals and orders
