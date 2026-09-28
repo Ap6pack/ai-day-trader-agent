@@ -147,7 +147,7 @@ def _article_state(symbol: str, article: Dict[str, Any]) -> Dict[str, Any]:
     source = article.get("source")
     if isinstance(source, dict):
         source = source.get("name")
-    return {
+    state = {
         "symbol": symbol,
         "article": {
             "headline": article.get("title") or "",
@@ -156,6 +156,11 @@ def _article_state(symbol: str, article: Dict[str, Any]) -> Dict[str, Any]:
             "published_at": article.get("publishedAt") or "",
         },
     }
+    if article.get("symbols"):
+        # Tickers the news provider tagged on the article; helps separate
+        # company news from multi-stock roundups.
+        state["article"]["tagged_tickers"] = article["symbols"]
+    return state
 
 
 def _cache_key(symbol: str, article: Dict[str, Any]) -> str:

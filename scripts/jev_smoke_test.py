@@ -5,8 +5,9 @@ Live check of the Jev news analyzer.
 Usage:
     python scripts/jev_smoke_test.py AAPL
 
-Needs TYPESAFE_API_KEY (and NEWS_API_KEY for real headlines) in the
-environment or .env. Without NEWS_API_KEY, two sample headlines are used.
+Needs TYPESAFE_API_KEY in the environment or .env. Headlines come from
+Alpaca news (ALPACA_API_KEY/ALPACA_SECRET_KEY), falling back to NewsAPI;
+if neither returns anything, two sample headlines are used.
 """
 
 import json
@@ -15,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import settings  # noqa: E402  (loads .env)
+import config.settings  # noqa: E402,F401  (loads .env)
 from core import jev_news_analyzer  # noqa: E402
 from core.news_fetcher import get_news_articles  # noqa: E402
 
@@ -32,9 +33,11 @@ def main() -> int:
         print("TYPESAFE_API_KEY is not set.")
         return 1
 
-    articles = get_news_articles(symbol) if settings.NEWS_API_KEY else []
-    if not articles:
-        print("No NewsAPI articles; using sample headlines.")
+    articles = get_news_articles(symbol)
+    if articles:
+        print(f"Fetched {len(articles)} articles from {articles[0].get('provider', 'newsapi')}.")
+    else:
+        print("No news articles found; using sample headlines.")
         articles = [dict(a, title=a["title"].format(sym=symbol)) for a in SAMPLE_ARTICLES]
 
     result = jev_news_analyzer.analyze_news(symbol, articles)
