@@ -238,6 +238,9 @@ Everything streams live:
 It binds to `127.0.0.1`. To open it from another machine set `DESK_TOKEN` and
 `DESK_HOST`; the desk refuses a non-local bind without a token.
 
+Charts are drawn with [TradingView](https://www.tradingview.com/) Lightweight Charts™
+(Apache 2.0, bundled in `static/vendor/lightweight-charts`).
+
 ## Commands
 
 | Command | Purpose |
