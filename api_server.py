@@ -9,8 +9,8 @@ import sys
 import uvicorn
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables; .env wins over stale shell exports
+load_dotenv(override=True)
 
 # Add project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
