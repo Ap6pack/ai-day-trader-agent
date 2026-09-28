@@ -161,7 +161,8 @@ Write a short Markdown report:
 3. Proposed changes to NEWSBOT_* thresholds, each with the evidence and the sample size. Say plainly
    when the sample is too small to justify a change. Do not edit any file; the user applies changes."""
 
-REVIEW_TOOLS = [f"Bash({py} -m trader.journal *)" for py in PYTHONS]
+# Read-only: the journal, and trader.status for the current NEWSBOT_* settings (never prints secrets).
+REVIEW_TOOLS = [f"Bash({py} -m {command})" for py in PYTHONS for command in ("trader.journal *", "trader.status")]
 
 
 def invoke_claude(prompt: str, run_dir: Path, tools: Optional[List[str]] = None) -> Dict[str, Any]:
