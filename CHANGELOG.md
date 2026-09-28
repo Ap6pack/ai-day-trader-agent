@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [4.0.0] - 2026-09-28
+
+### Redesign around Claude Code and Robinhood
+
+Claude now does the analysis and operates Robinhood through its MCP tools. The
+repository keeps only what those tools do not provide. The previous version is
+preserved under the `v1-legacy` tag.
+
+#### Added
+- `trader.guard` and `.claude/hooks/order_guard.sh`: a PreToolUse hook on Robinhood
+  order tools. Review-only mode by default; in live mode a dollar cap on buys, a daily
+  order cap, a required recent review, options and crypto off. Fails closed.
+- `trader.journal`: SQLite journal of reviews, guard decisions and trading decisions,
+  with outcome scoring and a summary.
+- `trader.sizing`: quantity and stop-loss from account figures.
+- `trader.news`: Jev headline judgments (`--json` for Claude, `--sample` to test Jev).
+- `trader.status`: mode, limits and credential status without printing secrets.
+- `.claude/skills/day-trader`: the analysis, sizing, review and journaling playbook.
+- Project permission rules that stop Claude's file tools from reading `.env` or editing
+  the guard configuration.
+
+#### Removed
+- Market data fetching and indicators (replaced by Robinhood historicals and indicators).
+- Portfolio database, FastAPI server, authentication, WebSockets and web dashboard.
+- OpenAI trade recommender and sentiment analyzer, Discord bot and CLI.
+- Alpaca order execution and the dividend capture engine.
+- Dependencies reduced to `requests` and `typesafe-sdk` (plus `pytest`).
+
+---
+
 ## [3.2.0] - 2025-07-09
 
 ### 🎯 **Intelligent API Rate Limiting - Professional Rate Limit Handling**
