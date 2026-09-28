@@ -406,3 +406,96 @@ def test_live_autopilot_needs_confirmation(env, journal, monkeypatch):
     env.delenv("ALPACA_LIVE_TRADING")
     with client_for(journal) as c:  # without the opt-in the account is unusable: live refuses
         assert c.post("/api/desk/autopilot", json={**body, "confirm_live": True}).status_code == 400
+
+
+# --- agents the desk starts on its own -------------------------------------------------
+
+
+class SpyProcess:
+    def __init__(self):
+        self.running, self.starts, self.stops = False, 0, 0
+
+    def start(self):
+        self.running, self.starts = True, self.starts + 1
+        return self.status()
+
+    def stop(self):
+        self.running, self.stops = False, self.stops + 1
+        return self.status()
+
+    def status(self):
+        return {"managed": self.starts > 0, "running": self.running, "pid": 42 if self.running else None,
+                "restarts": 0, "last_exit": None, "restart_at": None, "error": None, "log": "x"}
+
+    async def watch(self):
+        return None
+
+
+def agents_app(journal, spy):
+    return desk.create_app(journal=journal, background=False, start_agents=True, newsbot_process=spy)
+
+
+def test_agent_settings_defaults_and_env(env):
+    for name in ("DESK_START_NEWSBOT", "DESK_AUTOPILOT_MODE", "DESK_AUTOPILOT_SYMBOLS",
+                 "DESK_AUTOPILOT_INTERVAL_SECONDS", "DESK_AUTOPILOT_PORTFOLIO"):
+        env.delenv(name, raising=False)
+    s = desk.agent_settings()
+    assert s.start_newsbot and s.autopilot_mode == "signals" and s.autopilot_symbols == ("AUTO",)
+    env.setenv("DESK_START_NEWSBOT", "false")
+    env.setenv("DESK_AUTOPILOT_MODE", "paper")
+    env.setenv("DESK_AUTOPILOT_SYMBOLS", "nvda, tsla")
+    s = desk.agent_settings()
+    assert not s.start_newsbot and s.autopilot_mode == "paper" and s.autopilot_symbols == ("NVDA", "TSLA")
+    env.setenv("DESK_AUTOPILOT_MODE", "yolo")
+    assert desk.agent_settings().autopilot_mode == "off"
+
+
+def test_desk_starts_the_agents_on_its_own(env, journal, monkeypatch):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+    env.setenv("TYPESAFE_API_KEY", "t")
+    env.setenv("DESK_AUTOPILOT_MODE", "signals")
+    env.delenv("DESK_START_NEWSBOT", raising=False)
+    env.delenv("DESK_AUTOPILOT_SYMBOLS", raising=False)
+    monkeypatch.setattr(desk.autotrader, "load_universe", lambda: ["NVDA"])
+    monkeypatch.setattr(desk.analysis, "analyze", lambda *a, **k: fake_analysis(rec="HOLD", qty=0))
+    spy = SpyProcess()
+    with TestClient(agents_app(journal, spy)) as c:
+        assert spy.starts == 1
+        pilot = c.get("/api/desk/autopilot").json()
+        assert pilot["running"] and pilot["config"]["symbols"] == ["AUTO"] and pilot["config"]["mode"] == "signals"
+        assert c.get("/api/desk/newsbot").json()["process"]["running"] is True
+    assert spy.stops == 1  # the desk stops the bot when it shuts down
+
+
+def test_desk_reports_why_an_agent_did_not_start(env, journal):
+    env.setenv("DESK_AUTOPILOT_MODE", "paper")
+    env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")  # live host without the opt-in
+    spy = SpyProcess()
+    app = agents_app(journal, spy)
+    with TestClient(app) as c:
+        assert spy.starts == 0  # no keys
+        messages = [e["message"] for e in app.state.hub.live_events]
+        assert any("News bot not started: ALPACA_API_KEY" in m for m in messages)
+        assert any(m.startswith("Autopilot not started (paper)") for m in messages)
+        assert c.get("/api/desk/autopilot").json()["running"] is False
+
+
+def test_newsbot_process_start_stop_endpoint(env, journal):
+    spy = SpyProcess()
+    app = desk.create_app(journal=journal, background=False, newsbot_process=spy)
+    with TestClient(app) as c:
+        refused = c.post("/api/desk/newsbot/process", json={"run": True})
+        assert refused.status_code == 400 and "ALPACA_API_KEY" in refused.json()["detail"]
+        env.setenv("ALPACA_API_KEY", "k")
+        env.setenv("ALPACA_SECRET_KEY", "s")
+        env.setenv("TYPESAFE_API_KEY", "t")
+        assert c.post("/api/desk/newsbot/process", json={"run": True}).json()["process"]["running"] is True
+        assert c.post("/api/desk/newsbot/process", json={"run": False}).json()["process"]["running"] is False
+    assert spy.starts == 1
+
+
+def test_service_unit_runs_the_desk_and_restarts_it():
+    unit = desk.service_unit("/home/me/proj/.venv/bin/python", desk.Path("/home/me/proj"))
+    assert "ExecStart=/home/me/proj/.venv/bin/python -m trader.desk" in unit
+    assert "WorkingDirectory=/home/me/proj" in unit and "Restart=always" in unit

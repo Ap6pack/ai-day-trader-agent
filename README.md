@@ -198,6 +198,33 @@ with `TRADER_MODE=live` and the order guard (see above).
 python -m trader.desk          # then open http://127.0.0.1:8000/desk
 ```
 
+### The agents run on their own
+
+Starting the desk starts the agents, so they trade without you; the dashboard is where
+you watch them, step in, or trade yourself:
+
+- **News bot**: started as its own process and restarted if it ever stops (5 s, backing
+  off to 5 min). A setup problem such as missing keys, or `NEWSBOT_EXECUTION` not
+  matching the Alpaca account, is shown on the NEWS BOT tab and not retried. Its output
+  goes to `data/newsbot.log`. START / STOP BOT and PAUSE / RESUME TRADING are on the tab.
+  Don't also run `python -m trader.newsbot run` in a terminal: Alpaca allows one news
+  stream per account.
+- **Autopilot**: started with `DESK_AUTOPILOT_MODE` (default `signals`: analyze and
+  report, no trades; set `paper` to trade the paper account) on `DESK_AUTOPILOT_SYMBOLS`
+  (default `auto`: today's in-play stocks from the watchlist plus Alpaca's most-active and
+  movers, refreshed every cycle, up to `AUTOPILOT_MAX_SYMBOLS`, plus anything it holds).
+
+To keep them running around the clock, even after a reboot or crash, install the desk as
+a background service (Linux, systemd):
+
+```bash
+python -m trader.desk service     # prints the service file and the three commands to install it
+```
+
+It runs `python -m trader.desk` at boot and restarts it if it stops. Market hours are
+handled by the agents themselves: they keep watching and analyzing at any hour, and trade
+only when Alpaca's clock says the market is open.
+
 The desk is the window onto the agents, and lets you switch the automation on and off.
 Everything streams live:
 

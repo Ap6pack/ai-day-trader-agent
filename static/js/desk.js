@@ -24,7 +24,7 @@
   };
   const EVENT_TAG = {
     news_signal: 'JEV', news_skip: 'PASS', judgment: 'JUDGE', decision: 'CALL',
-    analysis_started: 'SCAN', strategy_signal: 'STRAT', analysis_error: 'ERR', autopilot: 'AUTO',
+    analysis_started: 'SCAN', strategy_signal: 'STRAT', analysis_error: 'ERR', autopilot: 'AUTO', system: 'SYS',
     order_submitted: 'ORDER', order_failed: 'REJ', order_cancelled: 'CXL', order_skipped: 'SKIP',
     flatten: 'FLAT', guard: 'GUARD',
   };
@@ -254,6 +254,7 @@
       case 'account': setAccount(msg.data); break;
       case 'newsbot': setNewsbot(msg.data); break;
       case 'autopilot': setAutopilot(msg.data); break;
+      case 'newsbot_process': if (S.newsbot) setNewsbot({ ...S.newsbot, process: msg.data }); break;
     }
   }
 
@@ -1051,8 +1052,10 @@
       return;
     }
     const doing = a.current_symbol ? `analyzing <b>${esc(a.current_symbol)}</b>` : a.next_cycle_at ? `next cycle in <b>${countdown(a.next_cycle_at)}</b>` : 'starting';
+    const auto = a.config.symbols.length === 1 && a.config.symbols[0] === 'AUTO';
+    const which = auto ? `<br>AUTO: ${a.universe?.length ? esc(a.universe.join(', ')) : 'loading today\'s in-play stocks…'}` : '';
     const where = a.config.mode === 'record' ? ` → ${esc(a.config.portfolio)}` : '';
-    $('pilot-status').innerHTML = `Cycle <b>${a.cycles}</b> · ${doing} · <b>${MODE_LABEL[a.config.mode] || a.config.mode}</b>${where}<br>${limits}`
+    $('pilot-status').innerHTML = `Cycle <b>${a.cycles}</b> · ${doing} · <b>${MODE_LABEL[a.config.mode] || a.config.mode}</b>${where}${which}<br>${limits}`
       + (a.last_error ? `<br><span class="down">${esc(a.last_error)}</span>` : '');
   }
 
@@ -1109,8 +1112,17 @@
     try { setNewsbot(await API.pauseNewsbot(paused)); toast(paused ? 'News bot trading paused' : 'News bot trading resumed'); }
     catch (err) { toast(`News bot: ${err.message}`, 4000); }
   }
+  async function runNewsbot(run) {
+    try { setNewsbot(await API.runNewsbot(run)); toast(run ? 'News bot started' : 'News bot stopped'); }
+    catch (err) { toast(`News bot: ${err.message}`, 5000); }
+  }
   $('ap-status').addEventListener('click', (e) => {
     if (e.target.closest('#bot-pause')) pauseNewsbot(!S.newsbot?.paused);
+    if (e.target.closest('#bot-run')) {
+      const running = !!S.newsbot?.process?.running;
+      if (running && !confirm('Stop the news bot? It will not trade or journal headlines until started again.')) return;
+      runNewsbot(!running);
+    }
   });
 
   function renderNewsbot() {
@@ -1119,13 +1131,24 @@
     const active = b.last_activity && Date.now() - new Date(b.last_activity).getTime() < BOT_ACTIVE_MS;
     $('ap-badge').hidden = !active;
     const mode = (b.execution || '—').toUpperCase();
-    $('ap-state').innerHTML = b.paused ? '<span class="down">PAUSED</span>'
+    const p = b.process;
+    const down = p?.managed && !p.running;
+    $('ap-state').innerHTML = down ? '<span class="down">STOPPED</span>'
+      : b.paused ? '<span class="down">PAUSED</span>'
+      : b.execution === 'live' ? `<span class="down">${mode}</span>`
       : b.execution === 'paper' ? `<span class="up">${mode}</span>` : mode;
     const st = b.settings || {};
     const universe = Array.isArray(b.universe) ? b.universe.join(',') : (b.universe || '—').toUpperCase();
+    const modeLabel = { paper: 'ALPACA PAPER ORDERS', live: 'LIVE ORDERS · REAL MONEY', off: 'SIGNALS ONLY' }[b.execution] || 'SIGNALS ONLY';
+    const procLabel = !p || !p.managed ? 'not run by the desk'
+      : p.running ? `<span class="up">RUNNING</span> · pid ${p.pid}${p.restarts ? ` · ${p.restarts} restarts` : ''}`
+      : p.error ? `<span class="down">STOPPED</span> · ${esc(p.error)}`
+      : p.restart_at ? `<span class="down">RESTARTING</span> in ${countdown(p.restart_at)}`
+      : '<span class="down">STOPPED</span>';
     $('ap-status').innerHTML = `
       <div class="kv">
-        <span>MODE</span><b>${b.execution === 'paper' ? 'ALPACA PAPER ORDERS' : 'SIGNALS ONLY'}${b.paused ? ' · <span class="down">PAUSED</span>' : ''}</b>
+        <span>PROCESS</span><b title="${esc(p?.log || '')}">${procLabel}</b>
+        <span>MODE</span><b>${modeLabel}${b.paused ? ' · <span class="down">PAUSED</span>' : ''}</b>
         <span>STOCKS</span><b title="${esc(universe)}">${esc(universe.length > 28 ? universe.slice(0, 28) + '…' : universe)}</b>
         <span>TRADES TODAY</span><b>${b.orders_today ?? 0} / ${b.max_trades_per_day ?? '—'}</b>
         <span>SIGNALS TODAY</span><b>${b.signals_today ?? 0}</b>
@@ -1135,8 +1158,11 @@
         <span>PER TRADE</span><b>${money(st.order_usd)} · TP ${st.take_profit_pct ?? '—'}% · SL ${st.stop_loss_pct ?? '—'}%</b>
         <span>COOLDOWN</span><b>${st.cooldown_minutes ?? '—'} min · cutoff ${st.entry_cutoff_minutes ?? '—'} min</b>
       </div>
-      <button class="btn wide ${b.paused ? 'btn-amber' : 'btn-stop'}" id="bot-pause" type="button">${b.paused ? 'RESUME BOT TRADING' : 'PAUSE BOT TRADING'}</button>
-      <div class="muted small">${active ? '' : 'No bot activity in the last 10 min. '}${b.paused ? 'Paused: the bot keeps judging and journaling headlines but places no orders. ' : ''}The bot runs on its own (python -m trader.newsbot run); change its rules in .env.</div>`;
+      <div class="bot-actions">
+        <button class="btn ${p?.running ? 'btn-ghost' : 'btn-amber'}" id="bot-run" type="button">${p?.running ? 'STOP BOT' : 'START BOT'}</button>
+        <button class="btn ${b.paused ? 'btn-amber' : 'btn-stop'}" id="bot-pause" type="button">${b.paused ? 'RESUME TRADING' : 'PAUSE TRADING'}</button>
+      </div>
+      <div class="muted small">${active ? '' : 'No bot activity in the last 10 min. '}${b.paused ? 'Paused: the bot keeps judging and journaling headlines but places no orders. ' : ''}The desk starts the bot and restarts it if it stops (DESK_START_NEWSBOT); change its rules in .env.</div>`;
   }
 
   /* ═══ Command line ═══ */
