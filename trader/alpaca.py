@@ -118,3 +118,43 @@ def close_all_positions() -> List[Dict[str, Any]]:
 def positions() -> List[Dict[str, Any]]:
     _require_paper()
     return _request("GET", trading_base_url() + "/v2/positions") or []
+
+
+
+# --- read-only account views for the desk (paper only) ------------------------
+
+
+def account() -> Dict[str, Any]:
+    _require_paper()
+    return _request("GET", trading_base_url() + "/v2/account")
+
+
+def orders(limit: int = 25, status: str = "all") -> List[Dict[str, Any]]:
+    _require_paper()
+    return _request("GET", trading_base_url() + "/v2/orders",
+                    params={"status": status, "limit": max(1, min(int(limit), 500)), "direction": "desc"}) or []
+
+
+# --- the desk's manual paper ticket ------------------------------------------
+
+
+def cancel_order(order_id: str) -> None:
+    _require_paper()
+    _request("DELETE", trading_base_url() + f"/v2/orders/{order_id}")
+
+
+def market_order_payload(symbol: str, side: str, qty: int) -> Dict[str, Any]:
+    """Plain day market order for the desk's manual paper ticket."""
+    side = side.lower()
+    if side not in ("buy", "sell"):
+        raise ValueError("side must be buy or sell")
+    if qty < 1 or int(qty) != qty:
+        raise ValueError("orders need a whole number of shares, at least 1")
+    return {
+        "symbol": symbol.upper(),
+        "qty": str(int(qty)),
+        "side": side,
+        "type": "market",
+        "time_in_force": "day",
+        "client_order_id": f"desk-{uuid.uuid4()}",
+    }

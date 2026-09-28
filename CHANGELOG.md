@@ -7,6 +7,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- `trader.desk`: the live trading desk (from PR #5) rebuilt on the new app and served by
+  `python -m trader.desk`. Its front end (chart, watchlist, tape, news, positions,
+  blotter, command line) is kept; it now streams the journal (news bot signals and orders
+  with Jev's numbers and latency, flattens, Claude's decisions, guard reviews), shows the
+  news bot's status, and JUDGE runs Jev with the bot's rules on a symbol's recent
+  headlines. The manual ticket sends Alpaca paper market orders, journaled as desk orders.
+  Local-only by default; `DESK_TOKEN` protects a non-local bind. `trader.market_feed`
+  keeps its Alpaca data with an optional Yahoo fallback (only if `yfinance` is installed).
 - `NEWSBOT_SYMBOLS=auto`: the news bot trades today's in-play stocks, refreshed every
   `NEWSBOT_UNIVERSE_REFRESH_MINUTES` from Alpaca's most-active and movers screeners plus
   `TRADER_WATCHLIST`; it judges nothing until a list is loaded.

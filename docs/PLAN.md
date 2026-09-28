@@ -63,7 +63,8 @@ Alpaca news stream ─► trader.newsbot ─► Jev (one request per headline, ~
 
 ### Status
 
-Built: `trader/alpaca.py`, `trader/newsbot.py`, `trader/autopilot.py` and their tests.
+Built: `trader/alpaca.py`, `trader/newsbot.py`, `trader/autopilot.py`, the live desk
+(`trader/desk.py`, `static/desk.html`, watching all of it) and their tests.
 Differences from the design below:
 
 - `run` flattens itself `NEWSBOT_FLATTEN_MINUTES` (default 10) before the close from

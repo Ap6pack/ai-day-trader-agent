@@ -4,6 +4,10 @@ requests==2.32.3
 typesafe-sdk==0.7.2
 # News bot stream (trader.newsbot)
 websockets==17.1
+# Live trading desk (python -m trader.desk)
+fastapi==0.141.1
+uvicorn==0.54.0
 
 # Tests
 pytest==9.0.2
+httpx==0.28.1

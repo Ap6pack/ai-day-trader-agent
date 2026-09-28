@@ -33,6 +33,10 @@ you ──► Claude Code ──► Robinhood MCP tools (quotes, indicators, acc
              ├──► python -m trader.news    (Jev headline judgments)
              ├──► python -m trader.sizing  (quantity and stop from account figures)
              └──► python -m trader.journal (decisions, outcomes, hit rate)
+
+browser ──► python -m trader.desk ──► live view of all of the above: quotes and charts,
+                                      the bot's signals/orders, Claude's decisions, guard
+                                      reviews, the Alpaca paper account; JUDGE; manual paper ticket
 ```
 
 ## Setup
@@ -141,6 +145,34 @@ After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, 
 - `run` (optional) has Claude analyze the scan shortlist in review mode.
 - `check` shows the setup and the MCP server names Claude Code sees.
 
+## Live trading desk
+
+![Live trading desk](docs/images/live-desk.png)
+
+```bash
+python -m trader.desk          # then open http://127.0.0.1:8000/desk
+```
+
+The desk is the window onto the agents. Everything streams live:
+
+- **Agent activity**: every headline the news bot judged (with Jev's probabilities and
+  latency, and why it traded or passed), its bracket orders and the end-of-day flatten,
+  Claude's decisions and the order guard's reviews, read from the journal as they are
+  written.
+- **Agent signal**: the bot's latest call on the loaded symbol, with entry, stop and
+  target drawn on the chart. **JUDGE** (or `SYM JG`) has Jev judge the symbol's recent
+  headlines with the bot's own rules, so you see what it would decide.
+- **News bot panel**: mode, today's stocks, trades against the daily cap, latency and
+  rules. The bot runs on its own; change its rules in `.env`.
+- **Market and account**: watchlist, ticker tape and candlestick chart (Alpaca, or
+  `DESK_DEMO_MODE=true` for simulated data), news, and the Alpaca paper account's
+  equity, positions and orders (tagged bot or manual).
+- **Manual paper ticket**: market orders to the Alpaca paper account only. They are
+  journaled as desk orders, so the daily review can tell them apart from the bot's.
+
+It binds to `127.0.0.1`. To open it from another machine set `DESK_TOKEN` and
+`DESK_HOST`; the desk refuses a non-local bind without a token.
+
 ## Commands
 
 | Command | Purpose |
@@ -152,6 +184,7 @@ After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, 
 | `python -m trader.journal decide ...` / `list` / `events` / `pending` / `outcome` / `summary` | Journal |
 | `python -m trader.newsbot run` / `replay SYMBOL [--hours H]` / `flatten` | Autonomous Alpaca paper news bot |
 | `python -m trader.autopilot score` / `review` / `run` / `check` / `cron` | Claude's scheduled runs |
+| `python -m trader.desk` | Live trading desk at http://127.0.0.1:8000/desk |
 
 ## Tests
 

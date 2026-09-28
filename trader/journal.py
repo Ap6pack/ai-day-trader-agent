@@ -143,6 +143,19 @@ class Journal:
                 (symbol.upper(), side.lower(), _iso(since)),
             ).fetchone()
 
+    def events_after(self, last_id: int, limit: int = 200) -> List[sqlite3.Row]:
+        """Events with id > last_id, oldest first (for streaming new rows)."""
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?", (last_id, limit),
+            ).fetchall()
+
+    def decisions_after(self, last_id: int, limit: int = 200) -> List[sqlite3.Row]:
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT * FROM decisions WHERE id > ? ORDER BY id ASC LIMIT ?", (last_id, limit),
+            ).fetchall()
+
     def events(self, limit: int = 20) -> List[sqlite3.Row]:
         with closing(self._connect()) as conn:
             return conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
