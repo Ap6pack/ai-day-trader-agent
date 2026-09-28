@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(/.env)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/hooks/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*[Rr]obinhood.*__(place_.*_order|exercise_option)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/order_guard.sh",
+            "timeout": 30,
+            "statusMessage": "Checking order against trading limits"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*[Rr]obinhood.*__(review_equity_order|place_.*_order|exercise_option)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/order_guard.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

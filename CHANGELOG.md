@@ -6,16 +6,71 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Live Trading Desk (`/desk`)
+### Added
+- `trader.desk`: the live trading desk (from PR #5) rebuilt on the new app and served by
+  `python -m trader.desk`. Its front end (chart, watchlist, tape, news, positions,
+  blotter, command line) is kept; it now streams the journal (news bot signals and orders
+  with Jev's numbers and latency, flattens, Claude's decisions, guard reviews), shows the
+  news bot's status, and JUDGE runs Jev with the bot's rules on a symbol's recent
+  headlines. The manual ticket sends Alpaca paper market orders, journaled as desk orders.
+  Local-only by default; `DESK_TOKEN` protects a non-local bind. `trader.market_feed`
+  keeps its Alpaca data with an optional Yahoo fallback (only if `yfinance` is installed).
+- `NEWSBOT_SYMBOLS=auto`: the news bot trades today's in-play stocks, refreshed every
+  `NEWSBOT_UNIVERSE_REFRESH_MINUTES` from Alpaca's most-active and movers screeners plus
+  `TRADER_WATCHLIST`; it judges nothing until a list is loaded.
+- `trader.autopilot`: Claude's unattended after-close runs. `score` records outcomes,
+  `review` reports the news bot's results by event type and probability bucket with
+  proposed `NEWSBOT_*` changes (never applied automatically), optional `run` analyzes the
+  scan shortlist, `check` and `cron` help set it up. Its tool allowlist never includes
+  order placement.
+- `trader.newsbot`: autonomous news trading on the Alpaca paper account (PLAN Phase 3).
+  Streams Alpaca news, judges each headline and symbol with Jev, applies the
+  `NEWSBOT_*` thresholds and places bracket orders with a size per trade, a daily cap,
+  a per-symbol cooldown, a minimum price and an entry cutoff before the close. Long
+  only; `NEWSBOT_EXECUTION=off` by default. `replay` tunes thresholds on recent
+  headlines; `flatten` closes all paper positions.
+- `trader.alpaca`: market clock, latest price and paper-only order entry. Order and
+  position functions refuse any base URL other than `https://paper-api.alpaca.markets`.
+- `NEWSBOT_ENTRY_CUTOFF_MINUTES` and `NEWSBOT_FLATTEN_MINUTES` (not in the original
+  plan): `run` flattens from Alpaca's clock before the close, including early-close
+  days a fixed cron time would miss, and takes no entries after that. Bracket legs are
+  day orders, so a position left at the close would be held overnight with no stop.
+- Stream errors after authentication are logged and the stream continues; only auth
+  failures stop `run`.
+- `websockets` dependency.
+
+### Removed
+- `trader.scan.market_clock`, which nothing called; `trader.alpaca.market_clock` replaces it.
+
+---
+
+## [4.0.0] - 2026-09-28
+
+### Redesign around Claude Code and Robinhood
+
+Claude now does the analysis and operates Robinhood through its MCP tools. The
+repository keeps only what those tools do not provide. The previous version is
+preserved under the `v1-legacy` tag.
 
 #### Added
-- Real-time trading terminal: streaming watchlist and ticker tape, live candlestick chart with SMA/EMA/VWAP and the agent's stop/target levels, agent signal breakdown, live agent activity feed, news, Alpaca paper positions, order blotter, paper order ticket, market clock and a Bloomberg-style command line.
-- `core/event_bus.py`: thread-safe in-process event bus. The analysis pipeline, trading workflow and Alpaca executor publish each step (analysis started, market data loaded, per-strategy signals, decision, order submitted/failed/skipped, trade recorded).
-- `core/market_feed.py`: batched Alpaca snapshot quotes and chart bars with Yahoo Finance fallback, plus a clearly labelled `DESK_DEMO_MODE` simulator.
-- `config/api/desk.py`: `/api/desk/*` REST endpoints (config, quotes, bars, news, events, account, order cancel, autopilot) and the `/ws/desk` WebSocket stream.
-- Autopilot: per-user background loop that re-analyzes a symbol list on an interval, in signals-only, local-record or Alpaca-paper-order mode.
-- `AlpacaExecutor.get_orders()` and `get_clock()`.
-- Vendored TradingView lightweight-charts 4.2.3 (Apache-2.0) under `static/vendor/`.
+- `trader.guard` and `.claude/hooks/order_guard.sh`: a PreToolUse hook on Robinhood
+  order tools. Review-only mode by default; in live mode a dollar cap on buys, a daily
+  order cap, a required recent review, options and crypto off. Fails closed.
+- `trader.journal`: SQLite journal of reviews, guard decisions and trading decisions,
+  with outcome scoring and a summary.
+- `trader.sizing`: quantity and stop-loss from account figures.
+- `trader.news`: Jev headline judgments (`--json` for Claude, `--sample` to test Jev).
+- `trader.status`: mode, limits and credential status without printing secrets.
+- `.claude/skills/day-trader`: the analysis, sizing, review and journaling playbook.
+- Project permission rules that stop Claude's file tools from reading `.env` or editing
+  the guard configuration.
+
+#### Removed
+- Market data fetching and indicators (replaced by Robinhood historicals and indicators).
+- Portfolio database, FastAPI server, authentication, WebSockets and web dashboard.
+- OpenAI trade recommender and sentiment analyzer, Discord bot and CLI.
+- Alpaca order execution and the dividend capture engine.
+- Dependencies reduced to `requests` and `typesafe-sdk` (plus `pytest`).
 
 ---
 

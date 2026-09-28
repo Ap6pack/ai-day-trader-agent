@@ -274,6 +274,10 @@ input::placeholder { color: var(--dim); }
 .tk-msg { font-size: 11px; min-height: 1.3em; }
 .auto .wide { grid-column: 1 / -1; }
 .ap-status { font-size: 11px; color: var(--muted); }
+/* News bot status panel: one column of key/value rows, note underneath. */
+#ap-status { display: block; overflow-y: auto; }
+#ap-status .kv { margin-bottom: 8px; }
+#ap-status .kv b { color: var(--text, #e6e6e6); }
 .ap-status b { color: var(--amber); }
 
 /* ── Modal ── */

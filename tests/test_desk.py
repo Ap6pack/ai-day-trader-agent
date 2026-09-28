@@ -1,336 +1,267 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
-from config.api import auth, desk
-from config.api.auth import User
-from core import market_feed
-from core.event_bus import EventBus, event_bus
-from core.portfolio_manager_provider import clear_portfolio_manager_cache
-from core.trading_workflow import TradingWorkflow
+from trader import desk, newsbot
+from trader.journal import Journal
+
+NOW = datetime(2026, 9, 28, 15, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def current_user() -> User:
-    return User(
-        id=1,
-        username="api-user",
-        email="api-user@example.com",
-        is_active=True,
-        is_admin=False,
-        created_at="2026-01-01T00:00:00",
-    )
+def journal(tmp_path):
+    return Journal(tmp_path / "desk.db")
 
 
-@pytest.fixture(autouse=True)
-def clean_bus():
-    event_bus.clear()
-    yield
-    event_bus.clear()
-
-
-# ── Event bus ─────────────────────────────────────────────────────────
-
-def test_event_bus_history_is_scoped_to_user():
-    bus = EventBus()
-    bus.publish("decision", "global")
-    bus.publish("decision", "mine", user_id=1)
-    bus.publish("decision", "theirs", user_id=2)
-
-    assert [e["message"] for e in bus.history(user_id=1)] == ["global", "mine"]
-    assert [e["message"] for e in bus.history(user_id=2)] == ["global", "theirs"]
-
-
-def test_event_bus_serializes_pipeline_values():
-    np = pytest.importorskip("numpy")
-    bus = EventBus()
-    event = bus.publish("decision", data={
-        "timestamp": datetime(2026, 1, 2, 3, 4, 5),
-        "rsi": np.float64(41.5),
-        "nan": float("nan"),
-        "nested": {"qty": np.int64(3)},
-    })
-
-    assert event["data"] == {
-        "timestamp": "2026-01-02T03:04:05",
-        "rsi": 41.5,
-        "nan": None,
-        "nested": {"qty": 3},
-    }
-
-
-async def test_event_bus_delivers_events_published_from_threads():
-    bus = EventBus()
-    queue = bus.subscribe()
-
-    await asyncio.to_thread(bus.publish, "order_submitted", "BUY 1 AAPL", symbol="AAPL")
-    event = await asyncio.wait_for(queue.get(), timeout=1)
-
-    assert event["type"] == "order_submitted"
-    assert event["symbol"] == "AAPL"
-    bus.unsubscribe(queue)
-
-
-# ── Market feed ───────────────────────────────────────────────────────
-
-def test_demo_quotes_and_bars_are_labelled(monkeypatch):
-    monkeypatch.setenv("DESK_DEMO_MODE", "true")
-
-    quotes = market_feed.get_quotes(["aapl", "MSFT", "AAPL"])
-    bars = market_feed.get_bars("AAPL", "5Min", 50)
-
-    assert set(quotes) == {"AAPL", "MSFT"}
-    assert all(q["source"] == "demo" for q in quotes.values())
-    assert quotes["AAPL"]["change_pct"] is not None
-    assert bars["source"] == "demo"
-    assert len(bars["bars"]) == 50
-    times = [b["time"] for b in bars["bars"]]
-    assert times == sorted(times)
-    assert all(b["low"] <= min(b["open"], b["close"]) for b in bars["bars"])
-
-
-def test_get_bars_rejects_unknown_timeframe():
-    with pytest.raises(ValueError):
-        market_feed.get_bars("AAPL", "3Min")
-
-
-def test_alpaca_snapshot_parsing(monkeypatch):
-    class FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {
-                "AAPL": {
-                    "latestTrade": {"p": 102.0, "t": "2026-01-02T15:00:00Z"},
-                    "latestQuote": {"bp": 101.9, "ap": 102.1, "bs": 3, "as": 4},
-                    "dailyBar": {"o": 100.5, "h": 103.0, "l": 99.5, "v": 1000},
-                    "prevDailyBar": {"c": 100.0},
-                }
-            }
-
-    captured = {}
-
-    def fake_get(url, headers, params, timeout):
-        captured.update(url=url, params=params)
-        return FakeResponse()
-
-    monkeypatch.delenv("DESK_DEMO_MODE", raising=False)
-    monkeypatch.setenv("ALPACA_API_KEY", "key")
-    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
-    monkeypatch.setattr(market_feed.requests, "get", fake_get)
-
-    quote = market_feed.get_quotes(["AAPL"])["AAPL"]
-
-    assert captured["url"].endswith("/v2/stocks/snapshots")
-    assert captured["params"]["symbols"] == "AAPL"
-    assert quote["last"] == 102.0
-    assert quote["bid"] == 101.9 and quote["ask"] == 102.1
-    assert quote["change"] == pytest.approx(2.0)
-    assert quote["change_pct"] == pytest.approx(2.0)
-    assert quote["source"] == "alpaca"
-
-
-# ── REST endpoints ────────────────────────────────────────────────────
-
-async def test_desk_config_reports_demo_mode(monkeypatch, current_user):
-    monkeypatch.setenv("DESK_DEMO_MODE", "1")
-    monkeypatch.setenv("DESK_WATCHLIST", "aapl, msft")
-
-    config = await desk.get_desk_config(current_user=current_user)
-
-    assert config["demo_mode"] is True
-    assert config["watchlist"] == ["AAPL", "MSFT"]
-    assert "5Min" in config["timeframes"]
-
-
-async def test_desk_events_hide_other_users_events(current_user):
-    event_bus.publish("decision", "for me", user_id=current_user.id)
-    event_bus.publish("decision", "for someone else", user_id=999)
-
-    events = await desk.get_desk_events(limit=50, current_user=current_user)
-
-    assert [e["message"] for e in events] == ["for me"]
-
-
-async def test_desk_bars_rejects_bad_symbol(current_user):
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as exc:
-        await desk.get_desk_bars("12$", timeframe="5Min", limit=100, current_user=current_user)
-    assert exc.value.status_code == 400
-
-
-def test_account_snapshot_without_keys(monkeypatch):
-    for name in ("ALPACA_API_KEY", "ALPACA_KEY_ID", "ALPACA_SECRET_KEY", "ALPACA_SECRET"):
+@pytest.fixture
+def env(monkeypatch):
+    for name in ("DESK_TOKEN", "DESK_DEMO_MODE", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TYPESAFE_API_KEY",
+                 "NEWSBOT_SYMBOLS", "NEWSBOT_EXECUTION", "ALPACA_TRADING_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
-
-    assert desk.account_snapshot() == {"connected": False, "message": "Alpaca keys not configured"}
-
-
-def test_account_snapshot_normalizes_alpaca(monkeypatch):
-    class FakeExecutor:
-        def get_account(self):
-            return {"status": "ACTIVE", "equity": "10100", "last_equity": "10000", "cash": "5000",
-                    "buying_power": "20000"}
-
-        def get_positions(self):
-            return [{"symbol": "AAPL", "qty": "5", "unrealized_pl": "12.5", "unrealized_plpc": "0.025",
-                     "avg_entry_price": "100", "current_price": "102.5"}]
-
-        def get_orders(self, limit=25):
-            return [{"id": "abc", "symbol": "AAPL", "side": "buy", "qty": "5", "status": "filled"}]
-
-        def get_clock(self):
-            return {"is_open": True, "next_close": "2026-01-02T21:00:00Z"}
-
-    monkeypatch.setenv("ALPACA_API_KEY", "key")
-    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
-    monkeypatch.setattr("core.alpaca_executor_provider.get_alpaca_executor", lambda: FakeExecutor())
-
-    snap = desk.account_snapshot()
-
-    assert snap["connected"] is True
-    assert snap["account"]["day_pl"] == pytest.approx(100.0)
-    assert snap["account"]["day_pl_pct"] == pytest.approx(1.0)
-    assert snap["positions"][0]["unrealized_plpc"] == pytest.approx(2.5)
-    assert snap["orders"][0]["status"] == "filled"
-    assert snap["clock"]["is_open"] is True
+    return monkeypatch
 
 
-# ── Autopilot ─────────────────────────────────────────────────────────
-
-def test_autopilot_config_validation():
-    config = desk.AutopilotConfig(symbols=["aapl", "bad sym", "AAPL", "msft"], interval_seconds=60)
-    assert config.symbols == ["AAPL", "MSFT"]
-
-    with pytest.raises(ValueError):
-        desk.AutopilotConfig(symbols=["AAPL"], interval_seconds=5)
-    with pytest.raises(ValueError):
-        desk.AutopilotConfig(symbols=["$$$"])
+def client_for(journal):
+    return TestClient(desk.create_app(journal=journal, background=False))
 
 
-async def test_autopilot_scans_symbols_and_stops(monkeypatch, portfolio_manager):
-    calls = []
-
-    def fake_run(self, symbol, portfolio_name="default", *, record_paper_trade=False,
-                 submit_alpaca_paper_order=False, user_id=None):
-        calls.append((symbol, record_paper_trade, submit_alpaca_paper_order, user_id))
-        from core.trading_workflow import WorkflowResult
-        return WorkflowResult(symbol=symbol, portfolio_name=portfolio_name, analysis={"signal": "HOLD"})
-
-    monkeypatch.setattr(TradingWorkflow, "run", fake_run)
-    manager = desk.AutopilotManager()
-    config = desk.AutopilotConfig(symbols=["AAPL", "MSFT"], interval_seconds=60)
-
-    status = await manager.start(7, config, portfolio_manager)
-    assert status["running"] is True
-    for _ in range(50):
-        if manager.status(7)["cycles"] and manager.status(7)["next_cycle_at"]:
-            break
-        await asyncio.sleep(0.02)
-
-    assert calls == [("AAPL", False, False, 7), ("MSFT", False, False, 7)]
-    stopped = await manager.stop(7)
-    assert stopped["running"] is False
-    messages = [e["message"] for e in event_bus.history(user_id=7)]
-    assert messages[0].startswith("Autopilot ON")
-    assert messages[-1] == "Autopilot OFF"
+def bot_signal(journal, symbol="NVDA", signal="buy", blocked=None, order=False):
+    record = {"news_id": 7, "headline": "Nvidia wins $5B contract", "published_at": "2026-09-28T14:59:30Z",
+              "signal": signal, "reason": "p_bullish 0.91 >= 0.75", "probability": 0.91,
+              "execution": "paper", "jev_ms": 280, "relevance": 0.97, "materiality": 0.8,
+              "p_bullish": 0.91, "p_bearish": 0.02, "event_type": "product", "price": 120.0}
+    if blocked:
+        record["blocked"] = blocked
+    if order:
+        record.update(order_id="abc12345-order", qty=4)
+    journal.log_event(newsbot.ORDER_EVENT if order else newsbot.SIGNAL_EVENT, tool="newsbot", symbol=symbol,
+                      side="buy", quantity=4 if order else None, price=120.0,
+                      detail=blocked or record["reason"], payload=record, now=NOW)
 
 
-# ── WebSocket ─────────────────────────────────────────────────────────
-
-@pytest.fixture
-def desk_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("PORTFOLIO_DB_PATH", str(tmp_path / "desk.db"))
-    monkeypatch.setenv("DESK_DEMO_MODE", "true")
-    monkeypatch.setenv("DESK_QUOTE_INTERVAL", "1")
-    clear_portfolio_manager_cache()
-    from config.api.dependencies import get_portfolio_manager
-    from config.api.server import app
-
-    db = get_portfolio_manager()
-    db.create_user(username="desk-user", email="desk@example.com",
-                   hashed_password=auth.get_password_hash("password123"))
-    user = db.get_user_by_username("desk-user")
-    token = auth.create_access_token({"sub": user["username"], "user_id": user["id"]})
-    with TestClient(app) as client:
-        yield client, token, user
-    clear_portfolio_manager_cache()
+# --- pages and auth ---------------------------------------------------------------
 
 
-def test_desk_websocket_rejects_missing_token(desk_client):
-    from starlette.websockets import WebSocketDisconnect
+def test_desk_page_and_assets_are_served(env, journal):
+    with client_for(journal) as c:
+        page = c.get("/desk")
+        assert page.status_code == 200 and "desk-api.js" in page.text
+        assert c.get("/static/js/desk.js").status_code == 200
+        assert c.get("/static/js/desk-api.js").status_code == 200
 
-    client, _, _ = desk_client
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws/desk") as ws:
-            ws.receive_json()
+
+def test_no_token_needed_by_default(env, journal):
+    with client_for(journal) as c:
+        assert c.get("/api/desk/auth").json() == {"auth_required": False}
+        cfg = c.get("/api/desk/config").json()
+        assert cfg["auth_required"] is False and cfg["watchlist"][0] == "SPY"
+        assert cfg["newsbot"]["execution"] == "off"
 
 
-def test_desk_websocket_streams_hello_quotes_and_events(desk_client):
-    client, token, user = desk_client
-    event_bus.publish("decision", "earlier call", symbol="AAPL", user_id=user["id"])
+def test_desk_token_is_enforced_on_api_and_socket(env, journal):
+    env.setenv("DESK_TOKEN", "s3cret")
+    with client_for(journal) as c:
+        assert c.get("/api/desk/auth").json() == {"auth_required": True}
+        assert c.get("/api/desk/config").status_code == 401
+        assert c.get("/api/desk/config", headers={"Authorization": "Bearer nope"}).status_code == 401
+        assert c.get("/api/desk/config", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+        with pytest.raises(Exception):
+            with c.websocket_connect("/ws/desk"):
+                pass
+        with c.websocket_connect("/ws/desk?token=s3cret") as ws:
+            assert ws.receive_json()["type"] == "hello"
 
-    with client.websocket_connect(f"/ws/desk?token={token}") as ws:
+
+def test_main_refuses_public_bind_without_token(env, monkeypatch):
+    monkeypatch.setattr(desk.config, "load_env", lambda *a, **k: None)
+    env.setenv("DESK_HOST", "0.0.0.0")
+    assert desk.main() == 2
+
+
+# --- agent activity from the journal ----------------------------------------------
+
+
+def test_bot_signals_orders_and_decisions_become_events(env, journal):
+    bot_signal(journal, signal="none")
+    bot_signal(journal, symbol="AMD", blocked="daily cap reached")
+    bot_signal(journal, symbol="NVDA", order=True)
+    journal.log_event(newsbot.FLATTEN_EVENT, tool="newsbot", detail="closed 1 positions", now=NOW)
+    journal.log_event("order_blocked", symbol="TSLA", side="buy", detail="Review-only mode", now=NOW)
+    journal.add_decision("NVDA", "buy", 120.0, confidence=0.91, thesis="[newsbot] product: Nvidia wins",
+                         mode="newsbot-paper", now=NOW)
+    journal.add_decision("AAPL", "pass", 200.0, thesis="No catalyst", mode="review", now=NOW)
+
+    events = desk.recent_events(journal)
+    by_type = {}
+    for e in events:
+        by_type.setdefault(e["type"], []).append(e)
+    assert set(by_type) == {"news_skip", "news_signal", "order_submitted", "flatten", "guard", "decision"}
+    order = by_type["order_submitted"][0]
+    assert order["symbol"] == "NVDA" and "BOT BUY 4 @ 120.0" in order["message"] and "Jev 280ms" in order["message"]
+    signal = order["data"]["signal"]
+    assert signal["call"] == "BUY" and signal["stop"] == 118.8 and signal["target"] == 122.4
+    assert signal["order_id"] == "abc12345-order"
+    blocked = by_type["news_signal"][0]
+    assert blocked["level"] == "warning" and "daily cap reached" in blocked["message"]
+    sources = sorted(e["message"].split()[0] for e in by_type["decision"])
+    assert sources == ["BOT", "CLAUDE"]
+
+
+def test_newsbot_status_counts_today(env, journal):
+    env.setenv("NEWSBOT_SYMBOLS", "auto")
+    env.setenv("NEWSBOT_EXECUTION", "paper")
+    bot_signal(journal, signal="none")
+    bot_signal(journal, order=True)
+    status = desk.newsbot_status(journal)
+    assert status["execution"] == "paper" and status["universe"] == "auto"
+    assert status["median_jev_ms"] == 280 and status["last_activity"]
+    assert status["max_trades_per_day"] == 5
+
+
+def test_hub_streams_only_new_journal_rows(env, journal):
+    import asyncio
+
+    bot_signal(journal, signal="none")
+    hub = desk.Hub(journal)
+    sent = []
+
+    async def run():
+        async def fake_broadcast(message):
+            sent.append(message)
+
+        hub.broadcast = fake_broadcast
+        hub.last_event_id = journal.events(1)[0]["id"]
+        assert await hub.poll_journal() == 0
+        bot_signal(journal, order=True)
+        journal.add_decision("NVDA", "buy", 120.0, thesis="[newsbot] x", mode="newsbot-paper", now=NOW)
+        assert await hub.poll_journal() == 2
+        assert await hub.poll_journal() == 0
+
+    asyncio.run(run())
+    assert [m["data"]["type"] for m in sent] == ["order_submitted", "decision"]
+
+
+def test_websocket_hello_and_watch(env, journal, monkeypatch):
+    bot_signal(journal, order=True)
+    app = desk.create_app(journal=journal, background=False)
+    app.state.hub.last_quotes["NVDA"] = {"last": 121.0}
+    with TestClient(app) as c, c.websocket_connect("/ws/desk") as ws:
         hello = ws.receive_json()
         assert hello["type"] == "hello"
-        assert hello["data"]["config"]["demo_mode"] is True
-        assert [e["message"] for e in hello["data"]["events"]] == ["earlier call"]
-
-        ws.send_json({"type": "watch", "symbols": ["aapl", "not valid!"]})
-        # Frames for the default watchlist may already be in flight; after the
-        # watch is applied only AAPL is streamed.
-        watched = None
-        for _ in range(10):
-            msg = ws.receive_json()
-            if msg["type"] == "quotes" and set(msg["data"]) == {"AAPL"}:
-                watched = msg["data"]
-                break
-        assert watched is not None
-        assert watched["AAPL"]["source"] == "demo"
-
-        event_bus.publish("order_submitted", "BUY 1 AAPL", symbol="AAPL")
-        event_bus.publish("decision", "someone else's", user_id=user["id"] + 100)
-        seen = []
-        for _ in range(10):
-            msg = ws.receive_json()
-            if msg["type"] == "event":
-                seen.append(msg["data"]["message"])
-                break
-        assert seen == ["BUY 1 AAPL"]
+        assert hello["data"]["events"][0]["type"] == "order_submitted"
+        assert hello["data"]["newsbot"]["orders_today"] >= 0
+        ws.send_text(json.dumps({"type": "watch", "symbols": ["nvda", "bad sym"]}))
+        assert ws.receive_json() == {"type": "quotes", "data": {"NVDA": {"last": 121.0}}}
+        ws.send_text(json.dumps({"type": "ping"}))
+        assert ws.receive_json() == {"type": "pong"}
 
 
-def test_desk_page_is_served(desk_client):
-    client, _, _ = desk_client
-    resp = client.get("/desk")
-    assert resp.status_code == 200
-    assert "ADT" in resp.text
-    assert client.get("/static/js/desk.js").status_code == 200
+# --- JUDGE ----------------------------------------------------------------------------
 
 
-# ── Pipeline instrumentation ──────────────────────────────────────────
-
-def test_pipeline_publishes_each_analysis_step(monkeypatch, tmp_path):
-    monkeypatch.setenv("PORTFOLIO_DB_PATH", str(tmp_path / "pipeline.db"))
-    monkeypatch.setenv("DESK_DEMO_MODE", "true")
-    monkeypatch.setenv("DIVIDEND_STRATEGY_ENABLED", "false")
-    clear_portfolio_manager_cache()
-    monkeypatch.setattr("core.pipeline.get_news_articles", lambda symbol: [])
-    from core.pipeline import EnhancedTradingPipeline
-
-    result = EnhancedTradingPipeline("AAPL", user_id=3).run_analysis({})
-    clear_portfolio_manager_cache()
-
-    assert not result.get("error")
-    events = event_bus.history(user_id=3)
-    assert [e["type"] for e in events] == [
-        "analysis_started", "market_data", "strategy_signal", "strategy_signal", "strategy_signal", "decision",
+def test_judge_applies_the_bot_rules_to_recent_headlines(env, journal, monkeypatch):
+    env.setenv("TYPESAFE_API_KEY", "t")
+    articles = [
+        {"title": "Nvidia wins $5B contract", "publishedAt": "2026-09-28T10:00:00Z", "url": "u1"},
+        {"title": "10 stocks to watch", "publishedAt": "2026-09-28T09:00:00Z", "url": "u2"},
     ]
-    assert all(e["symbol"] == "AAPL" and e["user_id"] == 3 for e in events)
-    assert events[1]["data"]["source"] == "demo"
-    assert events[-1]["data"]["signal"] == result["signal"]
+    judgments = {
+        "Nvidia wins $5B contract": {"relevance": 0.97, "materiality": 0.8, "p_bullish": 0.9,
+                                     "p_bearish": 0.02, "event_type": "product"},
+        "10 stocks to watch": {"relevance": 0.2, "materiality": 0.1, "p_bullish": 0.5,
+                               "p_bearish": 0.1, "event_type": "none"},
+    }
+    monkeypatch.setattr(desk, "get_news_articles", lambda s: articles)
+    monkeypatch.setattr(desk.jev_news, "judge_headline", lambda s, a: judgments[a["title"]])
+    monkeypatch.setattr(desk.market_feed, "get_quotes", lambda syms: {"NVDA": {"last": 100.0}})
+    with client_for(journal) as c:
+        res = c.post("/api/desk/judge/nvda").json()
+    assert res["call"] == "BUY" and res["probability"] == 0.9
+    assert res["price"] == 100.0 and res["stop"] == 99.0 and res["target"] == 102.0
+    assert [h["action"] for h in res["headlines"]] == ["buy", "none"]
+    assert "relevance" in res["headlines"][1]["reason"]
+
+
+def test_judge_needs_jev(env, journal):
+    with client_for(journal) as c:
+        res = c.post("/api/desk/judge/NVDA")
+    assert res.status_code == 400 and "TYPESAFE_API_KEY" in res.json()["detail"]
+
+
+# --- manual paper ticket ----------------------------------------------------------------
+
+
+def test_manual_order_is_paper_only_and_journaled(env, journal, monkeypatch):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+    sent = []
+    monkeypatch.setattr(desk.alpaca, "submit_order", lambda p: sent.append(p) or {"id": "o-123456789", "status": "accepted"})
+    with client_for(journal) as c:
+        res = c.post("/api/desk/orders", json={"symbol": "nvda", "side": "BUY", "qty": 3}).json()
+        assert res["submitted"] is True
+        assert sent[0]["symbol"] == "NVDA" and sent[0]["side"] == "buy" and sent[0]["qty"] == "3"
+        assert sent[0]["client_order_id"].startswith("desk-")
+        event = journal.events(1)[0]
+        assert event["kind"] == desk.DESK_ORDER_EVENT and event["quantity"] == 3
+        assert desk.journal_event(event)["message"].startswith("MANUAL BUY 3")
+
+        env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+        refused = c.post("/api/desk/orders", json={"symbol": "NVDA", "side": "buy", "qty": 1})
+        assert refused.status_code == 400 and "paper" in refused.json()["detail"]
+        assert len(sent) == 1
+
+
+def test_manual_order_rejection_is_reported_and_journaled(env, journal, monkeypatch):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+
+    def reject(payload):
+        raise RuntimeError("insufficient buying power")
+
+    monkeypatch.setattr(desk.alpaca, "submit_order", reject)
+    with client_for(journal) as c:
+        res = c.post("/api/desk/orders", json={"symbol": "NVDA", "side": "sell", "qty": 1}).json()
+    assert res == {"submitted": False, "skipped_reason": "insufficient buying power"}
+    assert desk.journal_event(journal.events(1)[0])["type"] == "order_failed"
+
+
+@pytest.mark.parametrize("body", [
+    {"symbol": "NVDA", "side": "hold", "qty": 1},
+    {"symbol": "NVDA", "side": "buy", "qty": 0},
+    {"symbol": "", "side": "buy", "qty": 1},
+])
+def test_manual_order_validation(env, journal, body):
+    with client_for(journal) as c:
+        assert c.post("/api/desk/orders", json=body).status_code == 422
+
+
+# --- account ------------------------------------------------------------------------------
+
+
+def test_account_snapshot_marks_order_origin(env, monkeypatch):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setattr(desk.alpaca, "account", lambda: {"equity": "10100", "last_equity": "10000",
+                                                         "buying_power": "20000", "cash": "5000"})
+    monkeypatch.setattr(desk.alpaca, "positions", lambda: [{"symbol": "NVDA", "qty": "4", "unrealized_plpc": "0.012"}])
+    monkeypatch.setattr(desk.alpaca, "orders", lambda limit: [
+        {"id": "1", "client_order_id": "newsbot-x", "symbol": "NVDA", "status": "filled"},
+        {"id": "2", "client_order_id": "desk-y", "symbol": "AMD", "status": "new"},
+    ])
+    monkeypatch.setattr(desk.alpaca, "market_clock", lambda: {"is_open": True})
+    snap = desk.account_snapshot()
+    assert snap["connected"] and snap["account"]["day_pl"] == 100.0
+    assert snap["positions"][0]["unrealized_plpc"] == pytest.approx(1.2)
+    assert [o["origin"] for o in snap["orders"]] == ["bot", "desk"]
+
+
+def test_account_snapshot_refuses_live_endpoint(env):
+    env.setenv("ALPACA_API_KEY", "k")
+    env.setenv("ALPACA_SECRET_KEY", "s")
+    env.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    snap = desk.account_snapshot()
+    assert snap["connected"] is False and "paper" in snap["message"]

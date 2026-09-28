@@ -1,6 +1,7 @@
 /**
- * ADT Desk — live trading terminal.
- * Streams quotes, agent events and Alpaca account state over /ws/desk.
+ * ADT Desk — live window onto the agents (Jev news bot, Claude, order guard),
+ * with a manual Alpaca paper ticket. Streams quotes, journal activity, the news
+ * bot's status and the Alpaca paper account over /ws/desk (python -m trader.desk).
  */
 (() => {
   'use strict';
@@ -15,13 +16,12 @@
   const TF_SECONDS = { '1Min': 60, '5Min': 300, '15Min': 900, '1Hour': 3600, '1Day': 86400 };
   const MAX_EVENTS = 400;
   const EVENT_GROUP = {
-    analysis_started: 'signal', market_data: 'signal', strategy_signal: 'signal', decision: 'signal',
-    order_submitted: 'order', order_failed: 'order', order_skipped: 'order', order_cancelled: 'order', trade_recorded: 'order',
+    news_signal: 'signal', news_skip: 'signal', judgment: 'signal', decision: 'signal',
+    order_submitted: 'order', order_failed: 'order', order_cancelled: 'order', flatten: 'order', guard: 'order',
   };
   const EVENT_TAG = {
-    analysis_started: 'RUN', market_data: 'DATA', strategy_signal: 'STRAT', decision: 'CALL',
-    order_submitted: 'ORDER', order_failed: 'REJ', order_skipped: 'SKIP', order_cancelled: 'CXL',
-    trade_recorded: 'BOOK', autopilot: 'AUTO', analysis_error: 'ERR',
+    news_signal: 'JEV', news_skip: 'PASS', judgment: 'JUDGE', decision: 'CALL',
+    order_submitted: 'ORDER', order_failed: 'REJ', order_cancelled: 'CXL', flatten: 'FLAT', guard: 'GUARD',
   };
 
   const S = {
@@ -38,7 +38,7 @@
     account: null,
     side: 'BUY',
     indicators: store.get('adt_desk_ind', { sma: true, ema: true, vwap: false, levels: true }),
-    autopilot: null,
+    newsbot: null,
     ws: null,
     wsRetry: 0,
     analyzing: new Set(),
@@ -73,7 +73,7 @@
   const dir = (v) => (num(v) === null || num(v) === 0 ? 'flat' : num(v) > 0 ? 'up' : 'down');
   const etTime = (d) => new Date(d).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false });
   function ago(iso) {
-    const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+    const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
     if (s < 60) return `${s}s`;
     if (s < 3600) return `${Math.floor(s / 60)}m`;
     if (s < 86400) return `${Math.floor(s / 3600)}h`;
@@ -123,6 +123,14 @@
 
   $('logout').addEventListener('click', async () => { await API.logout(); showLogin(); });
 
+  async function boot() {
+    try {
+      if (await API.isLoggedIn()) start(); else showLogin();
+    } catch (err) {
+      toast(`Desk server unavailable: ${err.message}`, 6000);
+    }
+  }
+
   /* ═══ Boot ═══ */
   async function start() {
     try {
@@ -135,6 +143,7 @@
       return;
     }
     $('login').hidden = true; $('desk').hidden = false;
+    $('logout').hidden = !S.config.auth_required;
     $('demo-badge').hidden = !S.config.demo_mode;
     if (!S.config.timeframes.includes(S.tf)) S.tf = S.config.default_timeframe;
 
@@ -160,10 +169,10 @@
 
   function connect() {
     const token = API.getAccessToken();
-    if (!token) return showLogin();
+    if (S.config?.auth_required && !token) return showLogin();
     setConn('connecting');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws/desk?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(`${proto}://${location.host}/ws/desk${token ? `?token=${encodeURIComponent(token)}` : ''}`);
     S.ws = ws;
     let opened = false;
 
@@ -173,7 +182,7 @@
       if (S.ws !== ws) return;
       setConn('');
       if (!opened) {
-        // Rejected at handshake: most likely an expired access token.
+        // Rejected at handshake: most likely a wrong or missing DESK_TOKEN.
         const ok = await API.refreshAccessToken();
         if (!ok) return showLogin();
       }
@@ -198,17 +207,17 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case 'hello':
-        S.events = (msg.data.events || []).slice().reverse();
-        S.events.forEach((e) => { if (e.type === 'decision' && e.symbol) S.decisions[e.symbol] = e.data; });
+        S.events = msg.data.events || [];
+        S.events.slice().reverse().forEach((e) => { if (e.data?.signal && e.symbol) S.decisions[e.symbol] = e.data.signal; });
         renderFeed();
-        setAutopilot(msg.data.autopilot);
+        setNewsbot(msg.data.newsbot);
         if (msg.data.account) setAccount(msg.data.account);
         if (S.decisions[S.symbol]) renderSignal(S.decisions[S.symbol]);
         break;
       case 'quotes': onQuotes(msg.data); break;
       case 'event': onEvent(msg.data); break;
       case 'account': setAccount(msg.data); break;
-      case 'autopilot': setAutopilot(msg.data); break;
+      case 'newsbot': setNewsbot(msg.data); break;
     }
   }
 
@@ -523,71 +532,58 @@
     renderLegend();
   }
 
-  /* ═══ Agent signal ═══ */
+  /* ═══ Agent signal: the news bot's (or JUDGE's) latest call ═══ */
   function normalizeDecision(d) {
-    const signals = d.all_signals || {};
-    const tech = signals.technical || {};
-    let conf = d.confidence;
-    if (typeof conf === 'string') conf = parseFloat(conf) / (conf.includes('%') ? 100 : 1);
     return {
-      rec: ['BUY', 'SELL'].includes(String(d.recommendation || d.signal).toUpperCase()) ? String(d.recommendation || d.signal).toUpperCase() : 'HOLD',
-      qty: d.quantity || 0,
-      conf: num(conf) ?? 0,
-      primary: d.primary_strategy,
-      reason: d.primary_reason || d.reason || '',
-      confirming: d.confirming_strategies ?? 0,
-      conflicting: d.conflicting_strategies ?? 0,
-      signals,
-      risk: d.risk_parameters || {},
-      ind: tech.indicators || d.technical_indicators || {},
-      price: num(tech.current_price) || num(d.technical_indicators?.current_price) || num(S.quotes[d.symbol]?.last),
+      rec: d.call === 'BUY' ? 'BUY' : d.call === 'BEARISH' ? 'SELL' : 'HOLD',
+      call: d.call || 'NONE',
+      conf: num(d.probability) ?? 0,
+      reason: d.reason || '',
+      price: num(d.price) ?? num(S.quotes[d.symbol]?.last),
+      risk: { stop_loss: d.stop, take_profit: d.target },
       ts: d.timestamp,
     };
   }
 
   function renderSignalEmpty() {
     $('sig-time').textContent = '';
-    $('signal-body').innerHTML = '<div class="empty">Press ANALYZE (or type <kbd>SYM AN</kbd>) to run the multi-strategy agent on this symbol.</div>';
+    $('signal-body').innerHTML = '<div class="empty">No call from the news bot on this symbol yet. Press JUDGE (or type <kbd>SYM JG</kbd>) to have Jev judge its recent headlines with the bot\'s rules.</div>';
   }
 
   function renderAnalyzing() {
-    $('signal-body').innerHTML = `<div class="analyzing"><div class="spin"></div>Agent analyzing ${esc(S.symbol)} — technical · sentiment · dividend…</div>`;
+    $('signal-body').innerHTML = `<div class="analyzing"><div class="spin"></div>Jev judging recent ${esc(S.symbol)} headlines…</div>`;
   }
+
+  const pct = (v) => (num(v) === null ? '—' : `${Math.round(num(v) * 100)}%`);
 
   function renderSignal(d) {
     const n = normalizeDecision(d);
-    $('sig-time').textContent = n.ts ? `@ ${etTime(n.ts)} ET` : '';
-    const strat = (name) => {
-      const s = n.signals[name];
-      if (!s) return '';
-      const sig = (s.signal || 'HOLD').toUpperCase();
-      const strength = num(s.strength ?? s.confidence) ?? 0;
-      return `<div class="strat ${sig} ${name === n.primary ? 'primary' : ''}">
-        <div class="strat-h"><b>${esc(name.toUpperCase())}</b><span class="${sig === 'BUY' ? 'up' : sig === 'SELL' ? 'down' : 'muted'}">${sig}</span>
-          <div class="meter"><i style="width:${Math.round(Math.min(1, strength) * 100)}%"></i></div><span class="muted">${Math.round(strength * 100)}%</span></div>
-        <div class="strat-r" title="${esc(s.reason)}">${esc(s.reason || '—')}</div></div>`;
-    };
-    const r = n.risk;
-    const ind = n.ind;
+    const who = d.source === 'judge' ? 'JUDGE' : 'NEWS BOT';
+    $('sig-time').textContent = `${who}${n.ts ? ` @ ${etTime(n.ts)} ET` : ''}`;
+    const rows = (d.headlines || []).map((h) => `
+      <div class="strat ${h.action === 'buy' ? 'BUY' : h.action === 'bearish' ? 'SELL' : 'HOLD'}">
+        <div class="strat-h"><b>${esc((h.event_type || 'news').toUpperCase())}</b>
+          <span class="${h.action === 'buy' ? 'up' : h.action === 'bearish' ? 'down' : 'muted'}">${esc((h.action || 'none').toUpperCase())}</span>
+          <div class="meter"><i style="width:${Math.round((num(h.p_bullish) ?? 0) * 100)}%"></i></div>
+          <span class="muted">↑${pct(h.p_bullish)} ↓${pct(h.p_bearish)}</span></div>
+        <div class="strat-r" title="${esc(h.reason)}">${esc(h.headline || '—')}</div>
+        <div class="strat-r muted">rel ${pct(h.relevance)} · mat ${pct(h.materiality)}${h.published_at ? ` · ${ago(h.published_at)} ago` : ''} · ${esc(h.blocked || h.reason || '')}</div>
+      </div>`).join('');
     $('signal-body').innerHTML = `
       <div class="sig">
         <div class="sig-call">
-          <div class="sig-rec ${esc(n.rec)}">${esc(n.rec)}</div>
-          <div class="sig-meta">QTY <b>${num(n.qty) ?? 0}</b> · CONF <b>${Math.round(n.conf * 100)}%</b></div>
+          <div class="sig-rec ${esc(n.rec)}">${esc(n.call)}</div>
+          <div class="sig-meta">P <b>${pct(n.conf)}</b>${d.jev_ms !== undefined && d.jev_ms !== null ? ` · JEV <b>${d.jev_ms}ms</b>` : ''}${d.execution ? ` · BOT <b>${esc(d.execution.toUpperCase())}</b>` : ''}</div>
           <div class="meter"><i style="width:${Math.round(n.conf * 100)}%"></i></div>
-          <div class="sig-meta"><b class="up">${n.confirming}</b> confirming · <b class="down">${n.conflicting}</b> conflicting</div>
           <div class="sig-reason">${esc(n.reason)}</div>
+          ${d.note ? `<div class="sig-meta muted">${esc(d.note)}</div>` : ''}
         </div>
-        <div class="strats">${['technical', 'sentiment', 'dividend'].map(strat).join('')}</div>
+        <div class="strats">${rows || '<div class="empty">No headlines judged.</div>'}</div>
         <div class="kv">
           <span>ENTRY</span><b>${px(n.price)}</b>
-          <span>STOP</span><b class="down">${px(r.stop_loss)}</b>
-          <span>TARGET</span><b class="up">${px(r.take_profit)}</b>
-          <span>R:R</span><b>${num(r.risk_reward_ratio) !== null ? (+r.risk_reward_ratio).toFixed(2) : '—'}</b>
-          <span>POS VALUE</span><b>${money(r.position_value)}</b>
-          <span>RISK</span><b>${money(r.total_risk)}${num(r.risk_percentage) !== null ? ` · ${(+r.risk_percentage).toFixed(1)}%` : ''}</b>
-          <span>RSI</span><b>${num(ind.rsi) !== null ? (+ind.rsi).toFixed(1) : '—'}</b>
-          <span>MACD</span><b>${num(ind.macd) !== null ? (+ind.macd).toFixed(3) : '—'}</b>
+          <span>STOP</span><b class="down">${px(n.risk.stop_loss)}</b>
+          <span>TARGET</span><b class="up">${px(n.risk.take_profit)}</b>
+          <span>ORDER</span><b>${d.order_id ? esc(String(d.order_id).slice(0, 8)) : '—'}</b>
         </div>
       </div>`;
   }
@@ -597,8 +593,7 @@
     S.analyzing.add(sym);
     if (sym === S.symbol) { renderAnalyzing(); $('analyze-btn').disabled = true; }
     try {
-      const res = await API.analyzeSymbol(sym, $('ap-portfolio').value.trim() || 'default');
-      S.decisions[sym] = res;
+      S.decisions[sym] = await API.judgeSymbol(sym);
     } catch (err) {
       toast(`${sym}: ${err.message}`, 4000);
     } finally {
@@ -616,13 +611,9 @@
   function onEvent(ev) {
     S.events.unshift(ev);
     if (S.events.length > MAX_EVENTS) S.events.length = MAX_EVENTS;
-    if (ev.type === 'decision' && ev.symbol) {
-      S.decisions[ev.symbol] = ev.data;
-      if (ev.symbol === S.symbol) { renderSignal(ev.data); drawLevels(); }
-    }
-    if (ev.type === 'analysis_started' && ev.symbol === S.symbol && !S.analyzing.has(ev.symbol)) renderAnalyzing();
-    if (ev.type === 'analysis_error' && ev.symbol === S.symbol && !S.analyzing.has(ev.symbol)) {
-      S.decisions[ev.symbol] ? renderSignal(S.decisions[ev.symbol]) : renderSignalEmpty();
+    if (ev.data?.signal && ev.symbol && !S.analyzing.has(ev.symbol)) {
+      S.decisions[ev.symbol] = ev.data.signal;
+      if (ev.symbol === S.symbol) { renderSignal(ev.data.signal); drawLevels(); }
     }
     if (EVENT_GROUP[ev.type] === 'order') refreshAccountSoon();
     if (matchesFilter(ev)) {
@@ -645,7 +636,7 @@
   function renderFeed() {
     const list = S.events.filter(matchesFilter);
     $('feed').innerHTML = list.length ? list.map((e) => eventHtml(e, false)).join('')
-      : '<div class="empty">Waiting for agent activity… run ANALYZE or start AUTOPILOT.</div>';
+      : '<div class="empty">Waiting for agent activity… the news bot\'s signals and orders, Claude\'s decisions and guard reviews appear here as they are journaled.</div>';
   }
 
   $('feed-filter').addEventListener('click', (e) => {
@@ -756,7 +747,7 @@
     if (c) text += open ? ` · ${countdown(c.next_close)}` : ` · ${countdown(c.next_open)}`;
     $('t-mkt').innerHTML = `<span class="${open ? 'up' : 'down'}">${text}</span>`;
     $('t-mkt-label').textContent = c ? (open ? 'MARKET · CLOSES' : 'MARKET · OPENS') : 'MARKET (EST.)';
-    renderAutopilotStatus();
+    renderNewsbot();
   }
   setInterval(tick, 1000);
 
@@ -802,60 +793,41 @@
     }
   });
 
-  /* ═══ Autopilot ═══ */
-  function setAutopilot(status) {
-    S.autopilot = status;
-    const running = !!status?.running;
-    $('ap-badge').hidden = !running;
-    $('ap-state').innerHTML = running ? '<span class="up">RUNNING</span>' : 'OFF';
-    const btn = $('ap-toggle');
-    btn.textContent = running ? 'STOP AUTOPILOT' : 'START AUTOPILOT';
-    btn.className = `btn wide ${running ? 'btn-stop' : 'btn-amber'}`;
-    if (running && status.config) {
-      $('ap-syms').value = status.config.symbols.join(',');
-      $('ap-interval').value = String(status.config.interval_seconds);
-      $('ap-portfolio').value = status.config.portfolio_name;
-      $('ap-mode').value = status.config.submit_paper_order ? 'paper' : status.config.record_local_trade ? 'record' : 'signals';
-    }
-    ['ap-syms', 'ap-interval', 'ap-portfolio', 'ap-mode'].forEach((id) => { $(id).disabled = running; });
-    renderAutopilotStatus();
+  /* ═══ News bot (runs on its own; the desk only shows it) ═══ */
+  const BOT_ACTIVE_MS = 10 * 60 * 1000;
+
+  function setNewsbot(status) {
+    S.newsbot = status || null;
+    renderNewsbot();
   }
 
-  function renderAutopilotStatus() {
-    const a = S.autopilot;
-    if (!a?.running) {
-      $('ap-status').innerHTML = 'Agent scans each symbol on a timer and streams every step to ACTIVITY.';
-      return;
-    }
-    const mode = a.config.submit_paper_order ? 'PAPER ORDERS' : a.config.record_local_trade ? 'LOCAL RECORDS' : 'SIGNALS ONLY';
-    const doing = a.current_symbol ? `scanning <b>${esc(a.current_symbol)}</b>` : a.next_cycle_at ? `next cycle in <b>${countdown(a.next_cycle_at)}</b>` : 'starting';
-    $('ap-status').innerHTML = `Cycle <b>${a.cycles}</b> · ${doing} · <b>${mode}</b>`;
+  async function refreshNewsbot() {
+    try { setNewsbot(await API.getNewsbot()); } catch (err) { toast(`News bot: ${err.message}`); }
   }
 
-  async function toggleAutopilot(forceOn) {
-    const running = !!S.autopilot?.running;
-    try {
-      if (running && forceOn !== true) {
-        setAutopilot(await API.stopAutopilot());
-        return;
-      }
-      if (running) return;
-      const symbols = ($('ap-syms').value.trim() ? $('ap-syms').value.split(/[\s,]+/) : S.watchlist)
-        .map((s) => s.trim().toUpperCase()).filter(Boolean);
-      const mode = $('ap-mode').value;
-      if (mode === 'paper' && !confirm(`Autopilot will SEND ALPACA PAPER ORDERS for ${symbols.length} symbols. Continue?`)) return;
-      setAutopilot(await API.startAutopilot({
-        symbols,
-        interval_seconds: parseInt($('ap-interval').value, 10),
-        portfolio_name: $('ap-portfolio').value.trim() || 'default',
-        record_local_trade: mode === 'record',
-        submit_paper_order: mode === 'paper',
-      }));
-    } catch (err) {
-      toast(`Autopilot: ${err.message}`, 4000);
-    }
+  function renderNewsbot() {
+    const b = S.newsbot;
+    if (!b) return;
+    const active = b.last_activity && Date.now() - new Date(b.last_activity).getTime() < BOT_ACTIVE_MS;
+    $('ap-badge').hidden = !active;
+    const mode = (b.execution || '—').toUpperCase();
+    $('ap-state').innerHTML = b.execution === 'paper' ? `<span class="up">${mode}</span>` : mode;
+    const st = b.settings || {};
+    const universe = Array.isArray(b.universe) ? b.universe.join(',') : (b.universe || '—').toUpperCase();
+    $('ap-status').innerHTML = `
+      <div class="kv">
+        <span>MODE</span><b>${b.execution === 'paper' ? 'ALPACA PAPER ORDERS' : 'SIGNALS ONLY'}</b>
+        <span>STOCKS</span><b title="${esc(universe)}">${esc(universe.length > 28 ? universe.slice(0, 28) + '…' : universe)}</b>
+        <span>TRADES TODAY</span><b>${b.orders_today ?? 0} / ${b.max_trades_per_day ?? '—'}</b>
+        <span>SIGNALS TODAY</span><b>${b.signals_today ?? 0}</b>
+        <span>LAST ACTIVITY</span><b>${b.last_activity ? `${ago(b.last_activity)} ago` : 'none yet'}</b>
+        <span>JEV LATENCY</span><b>${b.median_jev_ms !== null && b.median_jev_ms !== undefined ? `${b.median_jev_ms}ms med · ${b.max_jev_ms}ms max` : '—'}</b>
+        <span>THRESHOLDS</span><b>rel ${st.min_relevance ?? '—'} · mat ${st.min_materiality ?? '—'} · p ${st.min_probability ?? '—'}</b>
+        <span>PER TRADE</span><b>${money(st.order_usd)} · TP ${st.take_profit_pct ?? '—'}% · SL ${st.stop_loss_pct ?? '—'}%</b>
+        <span>COOLDOWN</span><b>${st.cooldown_minutes ?? '—'} min · cutoff ${st.entry_cutoff_minutes ?? '—'} min</b>
+      </div>
+      <div class="muted small">${active ? '' : 'No bot activity in the last 10 min. '}The bot runs on its own (python -m trader.newsbot run); change its rules in .env.</div>`;
   }
-  $('ap-form').addEventListener('submit', (e) => { e.preventDefault(); toggleAutopilot(); });
 
   /* ═══ Command line ═══ */
   function runCommand(raw) {
@@ -865,14 +837,10 @@
     const tfAlias = { '1M': '1Min', '5M': '5Min', '15M': '15Min', '1H': '1Hour', '1D': '1Day' };
     if (a === 'HELP' || a === '?') { $('help').hidden = false; return; }
     if (tfAlias[a]) return setTimeframe(tfAlias[a]);
-    if (a === 'AN' || a === 'ANALYZE') return analyze(b || S.symbol);
+    if (['AN', 'ANALYZE', 'JG', 'JUDGE'].includes(a)) return analyze(b || S.symbol);
+    if (a === 'BOT') return refreshNewsbot();
     if (a === 'ADD' && b) return addWatch(b);
     if ((a === 'DEL' || a === 'RM') && b) return removeWatch(b);
-    if (a === 'AP') {
-      if (b === 'ON') return toggleAutopilot(true);
-      if (b === 'OFF') return S.autopilot?.running && toggleAutopilot();
-      return toggleAutopilot();
-    }
     if ((a === 'BUY' || a === 'SELL') && b) {
       setSide(a);
       $('tk-qty').value = parseInt(b, 10) || 1;
@@ -882,7 +850,7 @@
       return;
     }
     loadSymbol(a);
-    if (b === 'AN' || b === 'ANALYZE') analyze(a);
+    if (['AN', 'ANALYZE', 'JG', 'JUDGE'].includes(b)) analyze(a);
   }
 
   $('cmd-form').addEventListener('submit', (e) => {
@@ -911,5 +879,5 @@
 
   /* ═══ Go ═══ */
   setSide('BUY');
-  if (API.isLoggedIn()) start(); else showLogin();
+  boot();
 })();

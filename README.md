@@ -1,298 +1,202 @@
-# AI Day Trader Agent
+# AI Day Trader
 
-A sophisticated, multi-strategy AI-powered trading agent that combines technical analysis, sentiment analysis, and dividend capture strategies to generate intelligent trade recommendations. Features enhanced signal fusion, comprehensive risk management, and professional-grade architecture.
+An intraday trading assistant built on Claude Code. Claude does the analysis and
+operates your Robinhood account through Robinhood's MCP tools; this repository adds
+what those tools do not provide:
 
----
+- **An order guard** that Claude cannot skip. A Claude Code hook checks every Robinhood
+  order against hard limits before it reaches the permission prompt, and blocks all
+  orders while the project is in review-only mode.
+- **Jev news judgments.** Each headline is scored by TypeSafe's Jev model for relevance,
+  direction, materiality and event type, then aggregated with recency weighting.
+- **A trade journal** that records every decision (including passes) with its thesis and
+  entry price, then scores it against the day's close, so you can see whether the
+  strategy works before risking money.
+- **A playbook** (`.claude/skills/day-trader`) that tells Claude how to analyze, size,
+  review and journal a trade.
+- **A news bot** (`trader.newsbot`) that trades Alpaca's news stream on its own, on the
+  Alpaca **paper** account only: Jev judges each headline, rules in code decide, and a
+  bracket order (entry, stop, target) goes in with no approval step.
 
-## Features
+The previous standalone version (multi-provider data fetching, FastAPI server, web
+dashboard, dividend capture engine) is preserved under the `v1-legacy` tag.
 
-### 🚀 **Enhanced Multi-Strategy Analysis**
-- **Technical Analysis**: RSI, MACD, SMA/EMA with intelligent signal fusion
-- **Sentiment Analysis**: Real-time news sentiment using OpenAI GPT-4.1
-- **Dividend Capture Strategy**: Advanced dividend timing and capture optimization
-- **Signal Fusion**: Intelligent combination of all strategies with priority-based decision making
+## How it fits together
 
-### 📊 **Advanced Market Data**
-- Multi-timeframe candlestick data (1m, 15m, 1h) via **both Twelve Data and Alpha Vantage APIs**
-- **500+ data points** for robust technical indicator calculations
-- Dual API fallback system for maximum reliability
-- Real-time price tracking with moving average comparisons
+```
+you ──► Claude Code ──► Robinhood MCP tools (quotes, indicators, account, orders)
+             │               ▲
+             │               └── .claude/hooks/order_guard.sh ─► trader.guard
+             │                   (runs before every order; fails closed)
+             ├──► python -m trader.scan    (candidates: Alpaca movers + Jev triage)
+             ├──  python -m trader.newsbot (on its own: Alpaca news ─► Jev ─► paper bracket orders)
+             ├──► python -m trader.news    (Jev headline judgments)
+             ├──► python -m trader.sizing  (quantity and stop from account figures)
+             └──► python -m trader.journal (decisions, outcomes, hit rate)
 
-### 🤖 **AI-Powered Intelligence**
-- Discord bot interface for real-time trade analysis
-- Enhanced analysis output with detailed technical indicators
-- Comprehensive risk management with stop-loss and take-profit calculations
-- Position sizing based on volatility and confidence levels
-
-### 🏗️ **Professional Architecture**
-- Modular, testable, and maintainable codebase
-- Proper Python import structure and module organization
-- Comprehensive error handling and logging
-- Production-ready configuration management
-
-### 🔄 **Intelligent Rate Limiting**
-- Automatic detection and handling of API rate limits
-- Exponential backoff with jitter for optimal retry timing
-- Request tracking to prevent hitting limits proactively
-- Configurable retry attempts and wait times
-- Seamless failover between data sources when rate limited
-
----
+browser ──► python -m trader.desk ──► live view of all of the above: quotes and charts,
+                                      the bot's signals/orders, Claude's decisions, guard
+                                      reviews, the Alpaca paper account; JUDGE; manual paper ticket
+```
 
 ## Setup
-
-### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/Ap6pack/ai-day-trader-agent.git
 cd ai-day-trader-agent
-```
-
-### 2. Install Dependencies
-
-```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env    # then add your keys; leave TRADER_MODE=review
 ```
 
-### 3. Environment Variables
+Start Claude Code in the project directory (`claude`). When it asks about the
+`robinhood-trading` MCP server from `.mcp.json`, enable it for this project and sign in
+to Robinhood. Order placement needs a Robinhood account with agentic trading enabled.
 
-Create a `.env` file in the project root with the following keys:
-
-```
-# Primary API Keys
-ALPACA_API_KEY=your_alpaca_key
-ALPACA_SECRET_KEY=your_alpaca_secret
-ALPACA_TRADING_BASE_URL=https://paper-api.alpaca.markets/v2
-OPENAI_API_KEY=your_openai_key
-
-# Optional notifications
-DISCORD_BOT_TOKEN=your_discord_bot_token
-DISCORD_GUILD_ID=your_discord_guild_id
-DISCORD_CHANNEL_ID=your_discord_channel_id
-
-# Optional market/news fallbacks
-MARKET_DATA_PROVIDERS=alpaca,yahoo_finance
-ALPACA_DATA_FEED=iex
-ALPACA_DATA_BASE_URL=https://data.alpaca.markets
-TWELVE_DATA_API_KEY=your_12data_api_key
-ALPHA_VANTAGE_API_KEY=your_alphavantage_api_key
-NEWS_API_KEY=your_newsapi_key
-
-# Optional Trading Configuration
-TRADING_CAPITAL=5000.0                    # Your trading capital in dollars
-MIN_POSITION_PERCENTAGE=0.02              # Minimum 2% of capital per trade
-MAX_POSITION_PERCENTAGE=0.10              # Maximum 10% of capital per trade
-
-# Optional API Tier Configuration
-TWELVE_DATA_PREMIUM=auto                  # auto (detect), true (premium), false (free)
-
-# API Rate Limiting Configuration
-ALPACA_RATE_LIMIT_WAIT=60                # Seconds to wait when rate limited
-ALPACA_MAX_RETRIES=3                     # Max retry attempts
-ALPACA_CALLS_PER_MINUTE=180              # Conservative default below Alpaca Basic historical limit
-
-TWELVE_DATA_RATE_LIMIT_WAIT=60           # Seconds to wait when rate limited
-TWELVE_DATA_MAX_RETRIES=3                # Max retry attempts
-TWELVE_DATA_CALLS_PER_MINUTE=8           # Your plan's limit
-
-ALPHA_VANTAGE_RATE_LIMIT_WAIT=60         # Seconds to wait when rate limited
-ALPHA_VANTAGE_MAX_RETRIES=3              # Max retry attempts
-ALPHA_VANTAGE_CALLS_PER_MINUTE=5         # Your plan's limit
-
-# Advanced Rate Limiting
-API_BACKOFF_FACTOR=2.0                   # Exponential backoff multiplier
-API_MAX_BACKOFF_SECONDS=300              # Maximum wait time (5 minutes)
-API_JITTER_ENABLED=true                  # Add randomness to prevent thundering herd
-```
-
-**Never commit your `.env` file to version control.**  
-The `.gitignore` is configured to exclude `.env`, logs, and other sensitive or unnecessary files.
-
-### 4. Trading Capital Configuration
-
-The system uses **portfolio-based position sizing** that adapts to your actual trading capital:
-
-- **Default**: $5,000 trading capital
-- **Flexible**: Works whether you own 0, 5, 100, or 4,933 shares of any stock
-- **Risk-Managed**: Position sizes scale with signal confidence and market volatility
-- **Configurable**: Adjust via environment variables or config files
-
----
-
-## Usage
-
-### Portfolio Management
-
-#### Setup a Portfolio
-```bash
-python run.py --setup-portfolio
-```
-Interactive wizard will guide you through creating a portfolio with trading capital and initial holdings.
-
-#### Portfolio Commands
-```bash
-# Show portfolio details
-python run.py --show-portfolio
-
-# List all portfolios
-python run.py --list-portfolios
-
-# Update trading capital
-python run.py --update-capital 10000
-
-# Add/update holdings
-python run.py --add-holding AAPL 100 --cost 150.00
-
-# Remove holdings
-python run.py --remove-holding AAPL
-
-# Record manual trades
-python run.py --record-trade AAPL BUY 50 155.00 --strategy technical --confidence 0.75
-
-# Show trade history
-python run.py --show-trades --days 30
-
-# Backup database
-python run.py --backup --output backups/portfolio_backup.db
-
-# Restore from backup
-python run.py --restore backups/portfolio_backup.db
-
-# Analyze entire portfolio
-python run.py --analyze-portfolio
-
-# Analyze specific portfolio
-python run.py --analyze-portfolio --portfolio my_portfolio
-```
-
-### REST API Server
-
-The AI Day Trader Agent now includes a professional REST API with WebSocket support for real-time updates.
-
-#### API Features
-- **JWT Authentication**: Secure token-based authentication
-- **Portfolio Management**: Full CRUD operations via REST endpoints
-- **Real-time Updates**: WebSocket support for live portfolio updates
-- **Trading Analysis**: Run analysis on symbols and portfolios
-- **Interactive Documentation**: Available at `http://localhost:8000/docs`
-
-**📚 For complete API documentation, examples, and WebSocket usage, see [API_DOCUMENTATION.md](API_DOCUMENTATION.md)**
-
-### Live Trading Desk
-
-A Bloomberg / thinkorswim-style terminal for watching the agent work in real time:
-
-![Live trading desk (demo mode)](docs/images/live-desk.png)
+Check the setup without exposing secrets:
 
 ```bash
-python api_server.py
-# open http://localhost:8000/desk and sign in
+python -m trader.status
 ```
 
-- **Streaming watchlist and ticker tape**: prices flash green or red on every tick. Quotes come from one batched Alpaca snapshot call, with Yahoo Finance as the fallback.
-- **Live candlestick chart** (1m/5m/15m/1h/1d) with volume, SMA20, EMA9 and VWAP. The forming candle updates as quotes arrive. After an analysis, the agent's entry, stop and target are drawn on the chart.
-- **Agent signal panel**: the BUY/SELL/HOLD call, confidence, how each strategy (technical, sentiment, dividend) voted and why, plus risk parameters.
-- **Agent activity feed**: every pipeline step streams in as it happens (data loaded, each strategy's signal, the final decision, orders submitted, rejected or skipped, trades recorded).
-- **Autopilot**: the agent re-scans a list of symbols on a timer. It has three modes: *signals only* (the default; nothing is traded), *record local paper trades*, or *send Alpaca paper orders*.
-- **Alpaca paper account**: equity, day P&L, buying power, positions, an order blotter with cancel, and a market clock.
-- **Paper order ticket** and a **command line**: type anywhere, e.g. `NVDA <GO>`, `NVDA AN` (analyze), `ADD TSLA`, `BUY 10`, `AP ON`, `5M`, or `HELP`.
+Then ask Claude, for example: *"Scan my watchlist for day-trade setups"* or
+*"Analyze NVDA for a day trade"*. The day-trader skill guides the rest.
 
-Try it without API keys by setting `DESK_DEMO_MODE=true`. Quotes and bars then come from a seeded simulator, the analysis pipeline runs on the simulated candles, and the desk shows a **DEMO DATA** badge. Other settings: `DESK_WATCHLIST` (default symbols), `DESK_QUOTE_INTERVAL` and `DESK_ACCOUNT_INTERVAL` (polling in seconds).
+## Review-only mode first
 
-The desk streams events from an in-process event bus, so run the API with `API_WORKERS=1` (the default).
+`TRADER_MODE=review` is the default. In this mode the guard blocks every
+`place_*_order` call; Claude reviews the order with `review_equity_order` and records
+what it would have done. Score those decisions each day
+(`python -m trader.journal pending`, then `outcome`) and check
+`python -m trader.journal summary`. Switch `.env` to `TRADER_MODE=live` yourself, and
+only once the record justifies it.
 
-### Trade Analysis
+## The order guard
 
-#### With Portfolio Context
+Configured in `.claude/settings.json`; logic in `trader/guard.py`. In live mode an
+order passes only if:
+
+- it is an equity order (options and crypto are off unless enabled),
+- the symbol is on `TRADER_ALLOWED_SYMBOLS` when that list is set,
+- it is sizeable from its own fields (a limit or stop price with a quantity, or a
+  dollar amount), and a buy is at most `TRADER_MAX_ORDER_USD`,
+- fewer than `TRADER_MAX_ORDERS_PER_DAY` orders passed today, and
+- the same symbol and side were reviewed within `TRADER_REVIEW_WINDOW_MINUTES`.
+
+Passing the guard does not approve an order: Claude Code still asks you. Any error in
+the guard blocks the order. The project settings also stop Claude's file tools from
+reading `.env` or editing the guard's configuration.
+
+**Limits of this protection:** hooks run only in Claude Code. Robinhood tools used from
+Claude Desktop or claude.ai chat are not guarded by this project. Use Claude Code for
+anything that can place an order.
+
+## The news bot (Alpaca paper)
+
+`python -m trader.newsbot run` streams Alpaca news, judges each headline with Jev and
+applies the `NEWSBOT_*` rules in `.env`: a relevance, materiality and bullish-probability
+threshold per headline, a maximum headline age, and roundups skipped. A bullish signal
+becomes a market-entry bracket order with a take-profit and a stop-loss, subject to a
+dollar size per trade, a daily trade cap, a per-symbol cooldown, a minimum price and no
+new entries near the close. It is long only; bearish signals are journaled as `sell`
+decisions so they are scored, but never shorted.
+
+- `NEWSBOT_EXECUTION=off` (the default) journals signals without ordering. Set it to
+  `paper` to trade.
+- Order functions refuse to run unless `ALPACA_TRADING_BASE_URL` is
+  `https://paper-api.alpaca.markets` (the default). There is no live mode.
+- The Claude Code order guard does not see these orders; the limits live in the bot.
+- `python -m trader.newsbot replay SYMBOL --hours 24` applies the rules to recent
+  headlines, never trading or journaling, for tuning thresholds.
+- `run` flattens (cancels open orders, closes every paper position)
+  `NEWSBOT_FLATTEN_MINUTES` before the close, read from Alpaca's clock, so early-close
+  days are covered. `python -m trader.newsbot flatten` does the same by hand or as a
+  cron backup.
+- The bot picks its own stocks with `NEWSBOT_SYMBOLS=auto`: every
+  `NEWSBOT_UNIVERSE_REFRESH_MINUTES` it rebuilds today's in-play list from Alpaca's
+  most-active stocks and top movers (above `TRADER_MIN_PRICE`) plus `TRADER_WATCHLIST`,
+  and skips headlines for anything else before calling Jev. If the list cannot be loaded
+  it judges nothing; a failed refresh keeps the previous list. A fixed list or empty (all
+  market news, one Jev call per one- or two-ticker headline) also work.
+- Its decisions share the journal with Claude's (`mode` is `newsbot-off` or
+  `newsbot-paper`), and `journal summary` does not yet split them.
+
+Suggested schedule (weekdays, `CRON_TZ=America/New_York`):
+
+```
+25 9  * * 1-5  cd /path/to/ai-day-trader-agent && timeout 7h .venv/bin/python -m trader.newsbot run >> data/newsbot.log 2>&1
+50 15 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.newsbot flatten >> data/newsbot.log 2>&1
+20 16 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.autopilot score >> data/autopilot.log 2>&1
+40 16 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.autopilot review >> data/autopilot.log 2>&1
+```
+
+`python -m trader.autopilot cron` prints these lines with your real paths.
+
+### Claude's daily review
+
+After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, with
+`--permission-mode dontAsk` and a short tool allowlist that never includes order placement):
+
+- `score` fills in each pending decision's outcome from the day's close.
+- `review` reads the journal and writes `data/runs/<time>-review/report.md`: signals,
+  trades, hit rate and return by event type and probability bucket, latency, and proposed
+  `NEWSBOT_*` changes with their evidence and sample size. It never edits `.env`; you apply
+  changes you agree with.
+- `run` (optional) has Claude analyze the scan shortlist in review mode.
+- `check` shows the setup and the MCP server names Claude Code sees.
+
+## Live trading desk
+
+![Live trading desk](docs/images/live-desk.png)
+
 ```bash
-# Analyze using default portfolio
-python run.py AAPL
-
-# Analyze with specific portfolio
-python run.py AAPL --portfolio my_portfolio
-
-# Submit an actionable recommendation to Alpaca paper trading
-python run.py AAPL --portfolio my_portfolio --paper-trade
-
-# Record an actionable recommendation locally without submitting an Alpaca order
-python run.py AAPL --portfolio my_portfolio --record-paper-trade
+python -m trader.desk          # then open http://127.0.0.1:8000/desk
 ```
 
-### Discord Bot
+The desk is the window onto the agents. Everything streams live:
 
-Start the bot:
+- **Agent activity**: every headline the news bot judged (with Jev's probabilities and
+  latency, and why it traded or passed), its bracket orders and the end-of-day flatten,
+  Claude's decisions and the order guard's reviews, read from the journal as they are
+  written.
+- **Agent signal**: the bot's latest call on the loaded symbol, with entry, stop and
+  target drawn on the chart. **JUDGE** (or `SYM JG`) has Jev judge the symbol's recent
+  headlines with the bot's own rules, so you see what it would decide.
+- **News bot panel**: mode, today's stocks, trades against the daily cap, latency and
+  rules. The bot runs on its own; change its rules in `.env`.
+- **Market and account**: watchlist, ticker tape and candlestick chart (Alpaca, or
+  `DESK_DEMO_MODE=true` for simulated data), news, and the Alpaca paper account's
+  equity, positions and orders (tagged bot or manual).
+- **Manual paper ticket**: market orders to the Alpaca paper account only. They are
+  journaled as desk orders, so the daily review can tell them apart from the bot's.
+
+It binds to `127.0.0.1`. To open it from another machine set `DESK_TOKEN` and
+`DESK_HOST`; the desk refuses a non-local bind without a token.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `python -m trader.status` | Mode, limits, credential status |
+| `python -m trader.scan [--all]` | Today's candidates: watchlist + Alpaca most-active and movers, ranked with Jev (material news first) |
+| `python -m trader.news SYMBOL [--json] [--sample]` | Jev judgments of recent headlines |
+| `python -m trader.sizing --symbol S --side buy --price P --equity E [...]` | Max quantity and stop-loss |
+| `python -m trader.journal decide ...` / `list` / `events` / `pending` / `outcome` / `summary` | Journal |
+| `python -m trader.newsbot run` / `replay SYMBOL [--hours H]` / `flatten` | Autonomous Alpaca paper news bot |
+| `python -m trader.autopilot score` / `review` / `run` / `check` / `cron` | Claude's scheduled runs |
+| `python -m trader.desk` | Live trading desk at http://127.0.0.1:8000/desk |
+
+## Tests
 
 ```bash
-python core/discord_bot.py
+python -m pytest
 ```
 
-In your Discord server, use:
+## Plan
 
-```
-!trade <TICKER>
-```
+See [docs/PLAN.md](docs/PLAN.md) for what comes next.
 
-Example:
+## Disclaimer
 
-```
-!trade AAPL
-```
-
----
-
-## Security & Compliance
-
-- All API keys and secrets are loaded from environment variables.
-- No sensitive data is logged or exposed in error messages.
-- License information is included in the LICENSE file (MIT License).
-- Follows best practices for modularity, error handling, and input validation.
-- `.gitignore` ensures secrets and logs are not tracked by git.
-
----
-
-## Project Structure
-
-- `core/`: Main pipeline modules
-- `utils/`: Logging and formatting utilities
-- `config/`: Environment variable loader
-- `run.py`: CLI entry point
-- `requirements.txt`: Python dependencies
-- `.gitignore`: Excludes secrets, logs, and unnecessary files
-
----
-
-## Enhanced Analysis Output
-
-The system now provides comprehensive trading analysis with detailed insights:
-
-```
-🤖 AI Day Trader Agent - Enhanced Analysis for APAM
-
- Analysis Results:
-----------------------------------------
-**Primary Strategy:** SENTIMENT
-**Recommendation:** HOLD
-**Confidence:** 50.0%
-**Quantity:** 0 shares
-**Reason:** Sentiment score: 0.40
-
-**Technical Indicators:**
-  Current Price: $40.60
-  RSI: 50.99 (Neutral)
-  MACD: -0.0529 / Signal: -0.0547 (Bullish)
-  SMA(20): $40.61 Below
-  EMA(20): $40.54 Above
-
-**All Strategy Signals:**
-  Technical: HOLD (strength: 0.20)
-  Sentiment: HOLD (score: 0.40)
-  Dividend: HOLD (reason: Outside capture window. Next dividend in 46 days)
-
-**Analysis Time:** 2025-06-29 19:58:52
-```
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) file for details.
+Educational software. Trading involves risk of loss. You are responsible for every
+order placed from your account.

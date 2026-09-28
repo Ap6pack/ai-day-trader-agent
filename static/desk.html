@@ -12,12 +12,11 @@
   <div id="login" class="login" hidden>
     <form id="login-form" class="login-card">
       <div class="brand brand-lg">ADT<span>&#9656;</span>DESK</div>
-      <p class="muted">Sign in to the live trading desk</p>
-      <label>USER <input id="login-user" autocomplete="username" required></label>
-      <label>PASS <input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <p class="muted">This desk requires its access token (DESK_TOKEN)</p>
+      <input id="login-user" type="hidden" value="desk">
+      <label>TOKEN <input id="login-pass" type="password" autocomplete="current-password" required></label>
       <button class="btn btn-go" type="submit">&lt;GO&gt;</button>
       <div id="login-error" class="err"></div>
-      <p class="muted small">No account? Create one on the <a href="/dashboard">classic dashboard</a>.</p>
     </form>
   </div>
 
@@ -29,7 +28,7 @@
       <form id="cmd-form" class="cmd">
         <span class="cmd-prompt">&gt;</span>
         <input id="cmd" autocomplete="off" spellcheck="false"
-               placeholder="Ticker or command — AAPL &lt;GO&gt;  ·  AAPL AN  ·  ADD TSLA  ·  AP ON  ·  HELP">
+               placeholder="Ticker or command — AAPL &lt;GO&gt;  ·  AAPL JG  ·  ADD TSLA  ·  BUY 10  ·  HELP">
         <button class="btn btn-go" type="submit">GO</button>
       </form>
       <div class="top-stats">
@@ -41,7 +40,7 @@
       </div>
       <div class="top-right">
         <span id="demo-badge" class="badge badge-demo" hidden title="Quotes and bars are simulated (DESK_DEMO_MODE=true)">DEMO DATA</span>
-        <span id="ap-badge" class="badge badge-ap" hidden>AUTOPILOT</span>
+        <span id="ap-badge" class="badge badge-ap" hidden title="The news bot journaled activity in the last 10 minutes">NEWS BOT</span>
         <span class="conn" id="conn" title="Live stream"><i></i><b>OFFLINE</b></span>
         <span id="user" class="muted"></span>
         <button id="logout" class="btn btn-ghost">EXIT</button>
@@ -93,9 +92,9 @@
               <button data-ind="sma" class="on">SMA20</button>
               <button data-ind="ema" class="on">EMA9</button>
               <button data-ind="vwap">VWAP</button>
-              <button data-ind="levels" class="on" title="Agent stop / target levels">LEVELS</button>
+              <button data-ind="levels" class="on" title="Bot entry / stop / target levels">LEVELS</button>
             </div>
-            <button class="btn btn-amber" id="analyze-btn">ANALYZE</button>
+            <button class="btn btn-amber" id="analyze-btn" title="Jev judges this symbol's recent headlines with the news bot's rules">JUDGE</button>
           </div>
         </div>
         <div class="chart-wrap">
@@ -109,7 +108,7 @@
       <section class="panel p-signal">
         <div class="ph"><h2>AGENT SIGNAL</h2><span class="ph-sub" id="sig-time"></span></div>
         <div class="pb" id="signal-body">
-          <div class="empty">Press ANALYZE (or type <kbd>SYM AN</kbd>) to run the multi-strategy agent on this symbol.</div>
+          <div class="empty">The news bot's latest call on this symbol appears here. Press JUDGE (or type <kbd>SYM JG</kbd>) to have Jev judge its recent headlines now.</div>
         </div>
       </section>
 
@@ -159,28 +158,12 @@
         </form>
       </section>
 
-      <!-- Autopilot -->
+      <!-- News bot -->
       <section class="panel p-auto">
-        <div class="ph"><h2>AUTOPILOT</h2><span class="ph-sub" id="ap-state">OFF</span></div>
-        <form class="pb auto" id="ap-form">
-          <label class="wide">SYMBOLS <input id="ap-syms" spellcheck="false" placeholder="uses watchlist"></label>
-          <label>EVERY
-            <select id="ap-interval">
-              <option value="60">1 min</option><option value="300" selected>5 min</option>
-              <option value="900">15 min</option><option value="1800">30 min</option><option value="3600">1 hr</option>
-            </select>
-          </label>
-          <label>PORTFOLIO <input id="ap-portfolio" value="default" spellcheck="false"></label>
-          <label class="wide">MODE
-            <select id="ap-mode">
-              <option value="signals">Signals only — watch, don't trade</option>
-              <option value="record">Record paper trades locally</option>
-              <option value="paper">Send Alpaca paper orders</option>
-            </select>
-          </label>
-          <div class="ap-status wide" id="ap-status"></div>
-          <button class="btn btn-amber wide" id="ap-toggle" type="submit">START AUTOPILOT</button>
-        </form>
+        <div class="ph"><h2>NEWS BOT</h2><span class="ph-sub" id="ap-state">—</span></div>
+        <div class="pb auto" id="ap-status">
+          <div class="empty">Waiting for the news bot's status…</div>
+        </div>
       </section>
 
     </main>
@@ -191,10 +174,10 @@
       <h2>COMMANDS</h2>
       <table class="tbl">
         <tr><td><kbd>AAPL</kbd> <kbd>&lt;GO&gt;</kbd></td><td>Load symbol into chart, quote, news and ticket</td></tr>
-        <tr><td><kbd>AAPL AN</kbd></td><td>Load and run the agent's analysis</td></tr>
+        <tr><td><kbd>AAPL JG</kbd></td><td>Load and have Jev judge its recent headlines with the news bot's rules</td></tr>
         <tr><td><kbd>ADD TSLA</kbd> / <kbd>DEL TSLA</kbd></td><td>Add / remove from watchlist</td></tr>
-        <tr><td><kbd>BUY 10</kbd> / <kbd>SELL 10</kbd></td><td>Pre-fill the order ticket for the loaded symbol</td></tr>
-        <tr><td><kbd>AP ON</kbd> / <kbd>AP OFF</kbd></td><td>Start / stop autopilot with the panel settings</td></tr>
+        <tr><td><kbd>BUY 10</kbd> / <kbd>SELL 10</kbd></td><td>Pre-fill the manual paper ticket for the loaded symbol</td></tr>
+        <tr><td><kbd>BOT</kbd></td><td>Refresh the news bot panel (the bot runs on its own: python -m trader.newsbot run)</td></tr>
         <tr><td><kbd>1M 5M 15M 1H 1D</kbd></td><td>Chart timeframe</td></tr>
         <tr><td><kbd>/</kbd></td><td>Focus the command line from anywhere</td></tr>
         <tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>Move through the watchlist</td></tr>
@@ -204,7 +187,7 @@
   </div>
 
   <script src="/static/vendor/lightweight-charts/lightweight-charts.standalone.production.js"></script>
-  <script src="/static/js/api.js"></script>
+  <script src="/static/js/desk-api.js"></script>
   <script src="/static/js/desk.js"></script>
 </body>
 </html>
