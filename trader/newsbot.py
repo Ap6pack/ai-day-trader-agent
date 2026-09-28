@@ -35,6 +35,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
 
 from trader import alpaca, config, jev_news
@@ -226,6 +227,25 @@ def _load_universe() -> List[str]:
 # --- bot --------------------------------------------------------------------
 
 
+def pause_flag() -> "Path":
+    """Flag file next to the journal: while it exists the bot judges and journals but places no orders."""
+    return config.journal_path().with_name("newsbot.paused")
+
+
+def is_paused() -> bool:
+    return pause_flag().exists()
+
+
+def set_paused(paused: bool) -> bool:
+    flag = pause_flag()
+    if paused:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    else:
+        flag.unlink(missing_ok=True)
+    return is_paused()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -360,6 +380,8 @@ class NewsBot:
         s = self.settings
         if s.execution != "paper":
             return "execution off (NEWSBOT_EXECUTION=off): signal journaled only", 0
+        if is_paused():
+            return "trading paused from the desk (signals still journaled)", 0
         try:
             clock = self.market_clock()
         except Exception as exc:

@@ -506,3 +506,22 @@ def test_universe_refresh_keeps_previous_on_failure_or_empty():
 def test_bot_has_a_universe_only_in_auto_mode(journal):
     assert newsbot.NewsBot(newsbot.load_settings({"NEWSBOT_SYMBOLS": "auto"}), journal=journal).universe
     assert newsbot.NewsBot(newsbot.load_settings({"NEWSBOT_SYMBOLS": "AAPL"}), journal=journal).universe is None
+
+
+# --- pause from the desk ---------------------------------------------------------
+
+
+def test_pause_blocks_orders_but_keeps_journaling(journal, tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADER_JOURNAL_PATH", str(tmp_path / "pause" / "journal.db"))
+    assert newsbot.set_paused(True) is True and newsbot.is_paused()
+    try:
+        bot, broker = make_bot(journal)
+        record = bot.handle("ACME", article(), NOW, news_id=1)
+        assert broker.orders == []
+        assert "paused" in record["blocked"]
+        assert events(journal, newsbot.SIGNAL_EVENT)
+    finally:
+        assert newsbot.set_paused(False) is False
+    bot, broker = make_bot(journal)
+    bot.handle("ACME", article(title="another"), NOW, news_id=2)
+    assert len(broker.orders) == 1
