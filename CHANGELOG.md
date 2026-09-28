@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- `NEWSBOT_SYMBOLS=auto`: the news bot trades today's in-play stocks, refreshed every
+  `NEWSBOT_UNIVERSE_REFRESH_MINUTES` from Alpaca's most-active and movers screeners plus
+  `TRADER_WATCHLIST`; it judges nothing until a list is loaded.
 - `trader.autopilot`: Claude's unattended after-close runs. `score` records outcomes,
   `review` reports the news bot's results by event type and probability bucket with
   proposed `NEWSBOT_*` changes (never applied automatically), optional `run` analyzes the

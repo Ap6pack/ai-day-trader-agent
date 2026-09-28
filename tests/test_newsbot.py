@@ -451,3 +451,58 @@ def test_consume_survives_errors_and_bad_frames():
 
 class _SettingsOnly:
     settings = PAPER
+
+
+# --- NEWSBOT_SYMBOLS=auto ------------------------------------------------------
+
+
+def test_auto_symbols_setting():
+    settings = newsbot.load_settings({"NEWSBOT_SYMBOLS": "auto", "NEWSBOT_UNIVERSE_REFRESH_MINUTES": "5"})
+    assert settings.auto_symbols and settings.symbols == frozenset()
+    assert settings.universe_refresh_minutes == 5
+    assert not newsbot.load_settings({"NEWSBOT_SYMBOLS": "AAPL"}).auto_symbols
+    with pytest.raises(ValueError):
+        newsbot.load_settings({"NEWSBOT_SYMBOLS": "auto", "NEWSBOT_UNIVERSE_REFRESH_MINUTES": "0"})
+
+
+def test_auto_symbols_judges_only_the_universe_and_fails_closed():
+    auto = newsbot.load_settings({"NEWSBOT_SYMBOLS": "auto"})
+    universe = frozenset({"NVDA", "TSLA"})
+    assert newsbot.symbols_to_judge(["NVDA"], auto, universe) == ["NVDA"]
+    assert newsbot.symbols_to_judge(["NVDA", "ZZZZ"], auto, universe) == ["NVDA"]
+    assert newsbot.symbols_to_judge(["ZZZZ"], auto, universe) == []
+    # No universe loaded yet: judge nothing rather than the whole market.
+    assert newsbot.symbols_to_judge(["NVDA"], auto, None) == []
+    assert newsbot.symbols_to_judge(["NVDA"], auto, frozenset()) == []
+
+
+def test_news_tasks_use_the_universe():
+    auto = newsbot.load_settings({"NEWSBOT_SYMBOLS": "auto"})
+    raw = json.dumps([
+        {"T": "n", "id": 1, "headline": "Nvidia wins deal", "symbols": ["NVDA"]},
+        {"T": "n", "id": 2, "headline": "Tiny co news", "symbols": ["ZZZZ"]},
+    ])
+    tasks = newsbot.news_tasks(newsbot.parse_messages(raw), newsbot.SeenIds(), auto, frozenset({"NVDA"}))
+    assert [t[0] for t in tasks] == ["NVDA"]
+
+
+def test_universe_refresh_keeps_previous_on_failure_or_empty():
+    results = [["nvda", "tsla"], RuntimeError("503"), [], ["AMD"]]
+
+    def loader():
+        value = results.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    universe = newsbot.Universe(loader)
+    assert universe.symbols == frozenset()
+    assert universe.refresh() == frozenset({"NVDA", "TSLA"})
+    assert universe.refresh() == frozenset({"NVDA", "TSLA"})  # failure keeps the list
+    assert universe.refresh() == frozenset({"NVDA", "TSLA"})  # empty keeps the list
+    assert universe.refresh() == frozenset({"AMD"})
+
+
+def test_bot_has_a_universe_only_in_auto_mode(journal):
+    assert newsbot.NewsBot(newsbot.load_settings({"NEWSBOT_SYMBOLS": "auto"}), journal=journal).universe
+    assert newsbot.NewsBot(newsbot.load_settings({"NEWSBOT_SYMBOLS": "AAPL"}), journal=journal).universe is None

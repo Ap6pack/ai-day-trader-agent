@@ -100,7 +100,7 @@ Differences from the design below:
   | Variable | Default | Meaning |
   |---|---|---|
   | `NEWSBOT_EXECUTION` | `off` | `off` or `paper` |
-  | `NEWSBOT_SYMBOLS` | empty (all) | optional allowlist; also the stream subscription |
+  | `NEWSBOT_SYMBOLS` | empty (all) | `auto` (today's in-play universe from `trader.scan`, refreshed every `NEWSBOT_UNIVERSE_REFRESH_MINUTES`), a fixed list, or empty for all news |
   | `NEWSBOT_MIN_RELEVANCE` | 0.8 | Jev "is this about the company" probability |
   | `NEWSBOT_MIN_MATERIALITY` | 0.6 | Jev materiality score, 0 to 1 |
   | `NEWSBOT_MIN_PROBABILITY` | 0.75 | bullish (or bearish) probability mass needed |

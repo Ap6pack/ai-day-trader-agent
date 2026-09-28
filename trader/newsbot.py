@@ -72,6 +72,9 @@ class Settings:
     min_price: float = 5.0
     entry_cutoff_minutes: int = 15
     flatten_minutes: int = 10
+    # NEWSBOT_SYMBOLS=auto: trade only today's in-play stocks from trader.scan's universe.
+    auto_symbols: bool = False
+    universe_refresh_minutes: int = 15
 
 
 def load_settings(env: Optional[Dict[str, str]] = None) -> Settings:
@@ -80,9 +83,13 @@ def load_settings(env: Optional[Dict[str, str]] = None) -> Settings:
     if execution not in EXECUTION_MODES:
         raise ValueError(f"NEWSBOT_EXECUTION must be one of {EXECUTION_MODES}, got {execution!r}")
     symbols = config._get(env, "NEWSBOT_SYMBOLS", "")
+    auto_symbols = symbols.strip().lower() == "auto"
     settings = Settings(
         execution=execution,
-        symbols=frozenset(s.strip().upper() for s in symbols.split(",") if s.strip()),
+        symbols=frozenset() if auto_symbols else frozenset(
+            s.strip().upper() for s in symbols.split(",") if s.strip()),
+        auto_symbols=auto_symbols,
+        universe_refresh_minutes=config._int(env, "NEWSBOT_UNIVERSE_REFRESH_MINUTES", 15),
         min_relevance=config._float(env, "NEWSBOT_MIN_RELEVANCE", 0.8),
         min_materiality=config._float(env, "NEWSBOT_MIN_MATERIALITY", 0.6),
         min_probability=config._float(env, "NEWSBOT_MIN_PROBABILITY", 0.75),
@@ -103,6 +110,8 @@ def load_settings(env: Optional[Dict[str, str]] = None) -> Settings:
         raise ValueError("NEWSBOT_TAKE_PROFIT_PCT and NEWSBOT_STOP_LOSS_PCT must be positive")
     if settings.order_usd <= 0 or settings.max_trades_per_day < 0 or settings.cooldown_minutes < 0:
         raise ValueError("NEWSBOT_ORDER_USD must be positive; trade cap and cooldown must not be negative")
+    if settings.universe_refresh_minutes < 1:
+        raise ValueError("NEWSBOT_UNIVERSE_REFRESH_MINUTES must be at least 1")
     if not 0 < settings.flatten_minutes < settings.entry_cutoff_minutes:
         raise ValueError("NEWSBOT_FLATTEN_MINUTES must be positive and less than NEWSBOT_ENTRY_CUTOFF_MINUTES, "
                          "so no entry can open after the flatten")
@@ -158,15 +167,60 @@ def decide(symbol: str, article: Dict[str, Any], judgment: Optional[Dict[str, An
     ))
 
 
-def symbols_to_judge(item_symbols: Iterable[str], settings: Settings) -> List[str]:
-    """Tagged symbols worth a Jev call: none for multi-stock roundups, allowlist applied."""
+def symbols_to_judge(item_symbols: Iterable[str], settings: Settings,
+                     universe: Optional[FrozenSet[str]] = None) -> List[str]:
+    """Tagged symbols worth a Jev call: none for multi-stock roundups, then the allowlist.
+
+    With NEWSBOT_SYMBOLS=auto the allowlist is today's in-play universe; until one has
+    been loaded nothing qualifies, so the bot never falls back to judging everything."""
     symbols = list(dict.fromkeys(str(s).upper() for s in item_symbols or [] if s))
     if not symbols or len(symbols) > settings.max_symbols_per_headline:
         return []
+    allowed = (universe or frozenset()) if settings.auto_symbols else settings.symbols
+    if settings.auto_symbols and not allowed:
+        return []
     return [
         s for s in symbols
-        if SYMBOL_RE.match(s) and (not settings.symbols or s in settings.symbols)
+        if SYMBOL_RE.match(s) and (not allowed or s in allowed)
     ]
+
+
+class Universe:
+    """Today's in-play symbols for NEWSBOT_SYMBOLS=auto: TRADER_WATCHLIST plus Alpaca's
+    most-active stocks and top movers above TRADER_MIN_PRICE (trader.scan). A failed
+    refresh keeps the previous list."""
+
+    def __init__(self, loader: Optional[Callable[[], Iterable[str]]] = None) -> None:
+        self._loader = loader or _load_universe
+        self._symbols: FrozenSet[str] = frozenset()
+        self._lock = threading.Lock()
+
+    @property
+    def symbols(self) -> FrozenSet[str]:
+        with self._lock:
+            return self._symbols
+
+    def refresh(self) -> FrozenSet[str]:
+        try:
+            fresh = frozenset(str(s).upper() for s in self._loader())
+        except Exception:
+            logger.exception("Universe refresh failed; keeping the previous list")
+            return self.symbols
+        if not fresh:
+            logger.warning("Universe refresh returned no symbols; keeping the previous list")
+            return self.symbols
+        with self._lock:
+            added, removed = fresh - self._symbols, self._symbols - fresh
+            self._symbols = fresh
+        logger.info(f"Universe: {len(fresh)} symbols (+{len(added)} -{len(removed)}): "
+                    f"{','.join(sorted(fresh))}")
+        return fresh
+
+
+def _load_universe() -> List[str]:
+    from trader import scan
+
+    return list(scan.build_universe(scan._settings()))
 
 
 # --- bot --------------------------------------------------------------------
@@ -192,6 +246,7 @@ class NewsBot:
         self.broker = broker
         self.now = now
         self.monotonic = monotonic
+        self.universe: Optional[Universe] = Universe() if settings.auto_symbols else None
         self._clock: Optional[Dict[str, Any]] = None
         self._clock_at = -math.inf
         self._clock_lock = threading.Lock()
@@ -392,7 +447,8 @@ def check_control(message: Dict[str, Any]) -> Optional[str]:
 
 
 def news_tasks(messages: List[Dict[str, Any]], seen: SeenIds,
-               settings: Settings) -> List["tuple[str, Dict[str, Any], Any]"]:
+               settings: Settings, universe: Optional[FrozenSet[str]] = None,
+               ) -> List["tuple[str, Dict[str, Any], Any]"]:
     """(symbol, article, news_id) for each new news item, one per symbol worth judging."""
     tasks = []
     for message in messages:
@@ -401,7 +457,7 @@ def news_tasks(messages: List[Dict[str, Any]], seen: SeenIds,
         if not seen.add(message.get("id")):
             continue
         article = _normalize_alpaca(message)
-        for symbol in symbols_to_judge(message.get("symbols"), settings):
+        for symbol in symbols_to_judge(message.get("symbols"), settings, universe):
             tasks.append((symbol, article, message.get("id")))
     return tasks
 
@@ -441,7 +497,9 @@ async def consume(ws: Any, bot: NewsBot, executor: Any, seen: SeenIds) -> None:
                     logger.info(f"Subscribed to news: {message.get('news')}")
             except StreamError as exc:
                 logger.error(str(exc))
-        for symbol, article, news_id in news_tasks(messages, seen, bot.settings):
+        bot_universe = getattr(bot, "universe", None)
+        universe = bot_universe.symbols if bot_universe else None
+        for symbol, article, news_id in news_tasks(messages, seen, bot.settings, universe):
             executor.submit(run_handle, symbol, article, received_at, news_id)
 
 
@@ -454,24 +512,36 @@ async def flatten_loop(bot: NewsBot, interval: float = FLATTEN_CHECK_SECONDS) ->
         await asyncio.sleep(interval)
 
 
+async def universe_loop(universe: Universe, minutes: int) -> None:
+    while True:
+        await asyncio.sleep(minutes * 60)
+        await asyncio.to_thread(universe.refresh)
+
+
 async def stream(bot: NewsBot, executor: ThreadPoolExecutor) -> None:
     from websockets.asyncio.client import connect
     from websockets.exceptions import ConnectionClosed
 
     seen = SeenIds()
     flattener = asyncio.create_task(flatten_loop(bot))
+    refresher = None
+    if bot.universe is not None:
+        await asyncio.to_thread(bot.universe.refresh)
+        refresher = asyncio.create_task(universe_loop(bot.universe, bot.settings.universe_refresh_minutes))
     try:
         async for ws in connect(STREAM_URL):  # reconnects with backoff on network errors
             try:
                 await _authenticate(ws, bot.settings)
                 logger.info(f"Connected to Alpaca news stream (execution={bot.settings.execution}, "
-                            f"symbols={sorted(bot.settings.symbols) or 'all'})")
+                            f"symbols={'auto' if bot.settings.auto_symbols else sorted(bot.settings.symbols) or 'all'})")
                 await consume(ws, bot, executor, seen)
             except ConnectionClosed as exc:
                 logger.warning(f"News stream closed ({exc}); reconnecting")
                 continue
     finally:
         flattener.cancel()
+        if refresher is not None:
+            refresher.cancel()
 
 
 # --- CLI --------------------------------------------------------------------
@@ -506,7 +576,9 @@ def replay(symbol: str, hours: float, settings: Settings) -> int:
     articles = get_alpaca_news(symbol, since=_now() - timedelta(hours=hours))
     for article in reversed(articles):
         published = _parse_time(article.get("publishedAt")) or _now()
-        if symbol not in symbols_to_judge(article.get("symbols"), settings):
+        # In auto mode, replay the named symbol as if it were in today's universe.
+        universe = frozenset({symbol}) if settings.auto_symbols else None
+        if symbol not in symbols_to_judge(article.get("symbols"), settings, universe):
             signal = Signal("none", f"skipped: tagged {article.get('symbols')} "
                                     f"(roundup or not in NEWSBOT_SYMBOLS)")
             judgment = None

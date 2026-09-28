@@ -108,10 +108,14 @@ decisions so they are scored, but never shorted.
   `NEWSBOT_FLATTEN_MINUTES` before the close, read from Alpaca's clock, so early-close
   days are covered. `python -m trader.newsbot flatten` does the same by hand or as a
   cron backup.
-- With `NEWSBOT_SYMBOLS` empty the bot subscribes to all market news: one Jev call per
-  one- or two-ticker headline. Start with an allowlist. Its decisions share the journal
-  with Claude's (`mode` is `newsbot-off` or `newsbot-paper`), and `journal summary` does
-  not yet split them.
+- The bot picks its own stocks with `NEWSBOT_SYMBOLS=auto`: every
+  `NEWSBOT_UNIVERSE_REFRESH_MINUTES` it rebuilds today's in-play list from Alpaca's
+  most-active stocks and top movers (above `TRADER_MIN_PRICE`) plus `TRADER_WATCHLIST`,
+  and skips headlines for anything else before calling Jev. If the list cannot be loaded
+  it judges nothing; a failed refresh keeps the previous list. A fixed list or empty (all
+  market news, one Jev call per one- or two-ticker headline) also work.
+- Its decisions share the journal with Claude's (`mode` is `newsbot-off` or
+  `newsbot-paper`), and `journal summary` does not yet split them.
 
 Suggested schedule (weekdays, `CRON_TZ=America/New_York`):
 
