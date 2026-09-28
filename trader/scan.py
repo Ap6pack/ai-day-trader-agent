@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 MOST_ACTIVES_PATH = "/v1beta1/screener/stocks/most-actives"
 MOVERS_PATH = "/v1beta1/screener/stocks/movers"
-DEFAULT_TRADING_URL = "https://paper-api.alpaca.markets"
 SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # skips warrants, units, preferreds
 SCAN_ARTICLES_PER_SYMBOL = 10
 MATERIAL_RELEVANCE = 0.7
@@ -75,20 +74,6 @@ def _get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
     resp = requests.get(url, headers=alpaca_headers(), params=params, timeout=10)
     resp.raise_for_status()
     return resp.json()
-
-
-def market_clock() -> Optional[Dict[str, Any]]:
-    """Alpaca's market clock ({is_open, next_open, next_close}), or None if unavailable."""
-    if not alpaca_configured():
-        return None
-    base = (config.secret("ALPACA_TRADING_BASE_URL") or DEFAULT_TRADING_URL).rstrip("/")
-    if base.endswith("/v2"):
-        base = base[: -len("/v2")]
-    try:
-        return _get(base + "/v2/clock", {})
-    except Exception as exc:
-        logger.warning(f"Alpaca market clock unavailable: {exc}")
-        return None
 
 
 def build_universe(settings: Dict[str, Any]) -> Dict[str, Candidate]:
