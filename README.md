@@ -14,6 +14,9 @@ what those tools do not provide:
   strategy works before risking money.
 - **A playbook** (`.claude/skills/day-trader`) that tells Claude how to analyze, size,
   review and journal a trade.
+- **A news bot** (`trader.newsbot`) that trades Alpaca's news stream on its own, on the
+  Alpaca **paper** account only: Jev judges each headline, rules in code decide, and a
+  bracket order (entry, stop, target) goes in with no approval step.
 
 The previous standalone version (multi-provider data fetching, FastAPI server, web
 dashboard, dividend capture engine) is preserved under the `v1-legacy` tag.
@@ -26,6 +29,7 @@ you ──► Claude Code ──► Robinhood MCP tools (quotes, indicators, acc
              │               └── .claude/hooks/order_guard.sh ─► trader.guard
              │                   (runs before every order; fails closed)
              ├──► python -m trader.scan    (candidates: Alpaca movers + Jev triage)
+             ├──  python -m trader.newsbot (on its own: Alpaca news ─► Jev ─► paper bracket orders)
              ├──► python -m trader.news    (Jev headline judgments)
              ├──► python -m trader.sizing  (quantity and stop from account figures)
              └──► python -m trader.journal (decisions, outcomes, hit rate)
@@ -83,6 +87,39 @@ reading `.env` or editing the guard's configuration.
 Claude Desktop or claude.ai chat are not guarded by this project. Use Claude Code for
 anything that can place an order.
 
+## The news bot (Alpaca paper)
+
+`python -m trader.newsbot run` streams Alpaca news, judges each headline with Jev and
+applies the `NEWSBOT_*` rules in `.env`: a relevance, materiality and bullish-probability
+threshold per headline, a maximum headline age, and roundups skipped. A bullish signal
+becomes a market-entry bracket order with a take-profit and a stop-loss, subject to a
+dollar size per trade, a daily trade cap, a per-symbol cooldown, a minimum price and no
+new entries near the close. It is long only; bearish signals are journaled as `sell`
+decisions so they are scored, but never shorted.
+
+- `NEWSBOT_EXECUTION=off` (the default) journals signals without ordering. Set it to
+  `paper` to trade.
+- Order functions refuse to run unless `ALPACA_TRADING_BASE_URL` is
+  `https://paper-api.alpaca.markets` (the default). There is no live mode.
+- The Claude Code order guard does not see these orders; the limits live in the bot.
+- `python -m trader.newsbot replay SYMBOL --hours 24` applies the rules to recent
+  headlines, never trading or journaling, for tuning thresholds.
+- `run` flattens (cancels open orders, closes every paper position)
+  `NEWSBOT_FLATTEN_MINUTES` before the close, read from Alpaca's clock, so early-close
+  days are covered. `python -m trader.newsbot flatten` does the same by hand or as a
+  cron backup.
+- With `NEWSBOT_SYMBOLS` empty the bot subscribes to all market news: one Jev call per
+  one- or two-ticker headline. Start with an allowlist. Its decisions share the journal
+  with Claude's (`mode` is `newsbot-off` or `newsbot-paper`), and `journal summary` does
+  not yet split them.
+
+Suggested schedule (weekdays, `CRON_TZ=America/New_York`):
+
+```
+25 9  * * 1-5  cd /path/to/ai-day-trader-agent && timeout 7h .venv/bin/python -m trader.newsbot run >> data/newsbot.log 2>&1
+50 15 * * 1-5  cd /path/to/ai-day-trader-agent && .venv/bin/python -m trader.newsbot flatten >> data/newsbot.log 2>&1
+```
+
 ## Commands
 
 | Command | Purpose |
@@ -92,6 +129,7 @@ anything that can place an order.
 | `python -m trader.news SYMBOL [--json] [--sample]` | Jev judgments of recent headlines |
 | `python -m trader.sizing --symbol S --side buy --price P --equity E [...]` | Max quantity and stop-loss |
 | `python -m trader.journal decide ...` / `list` / `events` / `pending` / `outcome` / `summary` | Journal |
+| `python -m trader.newsbot run` / `replay SYMBOL [--hours H]` / `flatten` | Autonomous Alpaca paper news bot |
 
 ## Tests
 

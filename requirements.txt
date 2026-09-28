@@ -1,7 +1,9 @@
 # Runtime: Jev news judgments and news sources.
-# The order guard, journal, sizing and status commands use only the standard library.
+# The order guard, journal and sizing commands use only the standard library.
 requests==2.32.3
 typesafe-sdk==0.7.2
+# News bot stream (trader.newsbot)
+websockets==17.1
 
 # Tests
 pytest==9.0.2

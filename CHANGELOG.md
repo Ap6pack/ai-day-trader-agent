@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Added
+- `trader.newsbot`: autonomous news trading on the Alpaca paper account (PLAN Phase 3).
+  Streams Alpaca news, judges each headline and symbol with Jev, applies the
+  `NEWSBOT_*` thresholds and places bracket orders with a size per trade, a daily cap,
+  a per-symbol cooldown, a minimum price and an entry cutoff before the close. Long
+  only; `NEWSBOT_EXECUTION=off` by default. `replay` tunes thresholds on recent
+  headlines; `flatten` closes all paper positions.
+- `trader.alpaca`: market clock, latest price and paper-only order entry. Order and
+  position functions refuse any base URL other than `https://paper-api.alpaca.markets`.
+- `NEWSBOT_ENTRY_CUTOFF_MINUTES` and `NEWSBOT_FLATTEN_MINUTES` (not in the original
+  plan): `run` flattens from Alpaca's clock before the close, including early-close
+  days a fixed cron time would miss, and takes no entries after that. Bracket legs are
+  day orders, so a position left at the close would be held overnight with no stop.
+- Stream errors after authentication are logged and the stream continues; only auth
+  failures stop `run`.
+- `websockets` dependency.
+
+### Removed
+- `trader.scan.market_clock`, which nothing called; `trader.alpaca.market_clock` replaces it.
+
+---
+
 ## [4.0.0] - 2026-09-28
 
 ### Redesign around Claude Code and Robinhood

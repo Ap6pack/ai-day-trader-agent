@@ -61,6 +61,23 @@ Alpaca news stream ─► trader.newsbot ─► Jev (one request per headline, ~
   but never shorted.
 - The bot never edits `.env`; Claude only proposes threshold changes in its report.
 
+### Status
+
+Built: `trader/alpaca.py`, `trader/newsbot.py` and their tests. Not built yet:
+`trader/autopilot.py` (Claude's after-close scoring and review). Differences from the
+design below:
+
+- `run` flattens itself `NEWSBOT_FLATTEN_MINUTES` (default 10) before the close from
+  Alpaca's clock, so early-close days (13:00) are covered; the 15:50 cron `flatten` is a
+  backup. `NEWSBOT_ENTRY_CUTOFF_MINUTES` (default 15, must exceed the flatten) blocks new
+  entries before that. Bracket legs are day orders: anything open at the close would be
+  held overnight with no stop.
+- Stream errors after authentication are logged, not fatal; only auth errors stop `run`.
+- `client_order_id` is a UUID derived from the news id and symbol, so a re-delivered
+  headline cannot open a second order.
+- `trader.scan` had no caller for its `market_clock`, so it was removed rather than
+  redirected.
+
 ### Files to add
 
 **`trader/alpaca.py`**, a small REST client (uses `alpaca_headers()` and

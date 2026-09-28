@@ -12,7 +12,8 @@ Safety:
   * Long only: bearish signals are journaled as `sell` decisions, never shorted.
   * Limits from .env: size per trade, trades per day, per-symbol cooldown,
     minimum price, no new entries close to the close, bracket on every order.
-    Positions are flattened by `flatten` before the close (cron).
+    `run` flattens every position NEWSBOT_FLATTEN_MINUTES before the close from
+    Alpaca's clock (so early-close days are covered); the cron `flatten` is a backup.
 
     python -m trader.newsbot run                   # stream and trade
     python -m trader.newsbot replay AAPL --hours 24  # apply the rules to recent headlines
@@ -51,6 +52,7 @@ FLATTEN_EVENT = "newsbot_flatten"
 CLOCK_CACHE_SECONDS = 60
 SEEN_IDS_MAX = 10000
 HANDLER_WORKERS = 8
+FLATTEN_CHECK_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class Settings:
     cooldown_minutes: int = 30
     min_price: float = 5.0
     entry_cutoff_minutes: int = 15
+    flatten_minutes: int = 10
 
 
 def load_settings(env: Optional[Dict[str, str]] = None) -> Settings:
@@ -92,6 +95,7 @@ def load_settings(env: Optional[Dict[str, str]] = None) -> Settings:
         cooldown_minutes=config._int(env, "NEWSBOT_COOLDOWN_MINUTES", 30),
         min_price=config._float(env, "NEWSBOT_MIN_PRICE", 5.0),
         entry_cutoff_minutes=config._int(env, "NEWSBOT_ENTRY_CUTOFF_MINUTES", 15),
+        flatten_minutes=config._int(env, "NEWSBOT_FLATTEN_MINUTES", 10),
     )
     if not 0 < settings.min_probability <= 1:
         raise ValueError("NEWSBOT_MIN_PROBABILITY must be in (0, 1]")
@@ -99,6 +103,9 @@ def load_settings(env: Optional[Dict[str, str]] = None) -> Settings:
         raise ValueError("NEWSBOT_TAKE_PROFIT_PCT and NEWSBOT_STOP_LOSS_PCT must be positive")
     if settings.order_usd <= 0 or settings.max_trades_per_day < 0 or settings.cooldown_minutes < 0:
         raise ValueError("NEWSBOT_ORDER_USD must be positive; trade cap and cooldown must not be negative")
+    if not 0 < settings.flatten_minutes < settings.entry_cutoff_minutes:
+        raise ValueError("NEWSBOT_FLATTEN_MINUTES must be positive and less than NEWSBOT_ENTRY_CUTOFF_MINUTES, "
+                         "so no entry can open after the flatten")
     return settings
 
 
@@ -191,6 +198,7 @@ class NewsBot:
         # Serializes the limit checks and the order so two headlines at once
         # cannot both pass the daily cap or the cooldown.
         self._order_lock = threading.Lock()
+        self._flattened_for: Optional[str] = None
 
     def market_clock(self) -> Dict[str, Any]:
         with self._clock_lock:
@@ -242,6 +250,7 @@ class NewsBot:
             confidence=signal.probability,
             thesis=f"[newsbot] {record.get('event_type') or 'news'}: {article.get('title') or ''}"[:500],
             mode=f"newsbot-{self.settings.execution}",
+            now=self.now(),
         )
         if signal.action == "bearish":
             record["blocked"] = "long only: bearish signals are journaled, not shorted"
@@ -265,6 +274,32 @@ class NewsBot:
             record["order_status"] = (order or {}).get("status")
             record["qty"] = qty
             return self._log(ORDER_EVENT, symbol, record, received_at, side=side, qty=qty)
+
+    def maybe_flatten(self) -> Optional[Dict[str, Any]]:
+        """Close every paper position once per session, NEWSBOT_FLATTEN_MINUTES before the close.
+
+        Bracket legs are day orders: a position still open at the close would be
+        held overnight with no stop. Failures are retried on the next check."""
+        if self.settings.execution != "paper":
+            return None
+        try:
+            clock = self.market_clock()
+        except Exception as exc:
+            logger.warning(f"Flatten check skipped, market clock unavailable: {exc}")
+            return None
+        next_close = _parse_time(clock.get("next_close"))
+        if not clock.get("is_open") or next_close is None or clock["next_close"] == self._flattened_for:
+            return None
+        if next_close - self.now() > timedelta(minutes=self.settings.flatten_minutes):
+            return None
+        with self._order_lock:
+            closed = self.broker.close_all_positions()
+            self._flattened_for = clock["next_close"]
+        detail = f"closed {len(closed)} positions before the {clock['next_close']} close"
+        self.journal.log_event(FLATTEN_EVENT, tool="newsbot", detail=detail,
+                               payload={"response": closed}, now=self.now())
+        logger.info(f"{FLATTEN_EVENT}: {detail}")
+        return {"closed": len(closed), "next_close": clock["next_close"]}
 
     def _check_limits(self, symbol: str, price: float) -> "tuple[Optional[str], int]":
         s = self.settings
@@ -300,12 +335,13 @@ class NewsBot:
 
     def _log(self, kind: str, symbol: str, record: Dict[str, Any], received_at: datetime,
              side: Optional[str] = None, qty: Optional[int] = None) -> Dict[str, Any]:
-        record["total_ms"] = round((self.now() - received_at).total_seconds() * 1000)
+        now = self.now()
+        record["total_ms"] = round((now - received_at).total_seconds() * 1000)
         price = record.get("price")
         self.journal.log_event(
             kind, tool="newsbot", symbol=symbol, side=side, quantity=qty, price=price,
             notional=qty * price if qty and price else None,
-            detail=record.get("blocked") or record["reason"], payload=record,
+            detail=record.get("blocked") or record["reason"], payload=record, now=now,
         )
         record["kind"] = kind
         record["symbol"] = symbol
@@ -382,11 +418,9 @@ async def _authenticate(ws: Any, settings: Settings) -> None:
                 return
 
 
-async def stream(bot: NewsBot, executor: ThreadPoolExecutor) -> None:
-    from websockets.asyncio.client import connect
-    from websockets.exceptions import ConnectionClosed
-
-    seen = SeenIds()
+async def consume(ws: Any, bot: NewsBot, executor: Any, seen: SeenIds) -> None:
+    """Dispatch news from an authenticated stream. Errors after auth are logged, not fatal:
+    if the server gives up on us it closes the socket and the caller reconnects."""
 
     def run_handle(symbol: str, article: Dict[str, Any], received_at: datetime, news_id: Any) -> None:
         try:
@@ -394,22 +428,50 @@ async def stream(bot: NewsBot, executor: ThreadPoolExecutor) -> None:
         except Exception:
             logger.exception(f"newsbot handler failed for {symbol} news {news_id}")
 
-    async for ws in connect(STREAM_URL):  # reconnects with backoff on network errors
+    async for raw in ws:
+        received_at = _now()
         try:
-            await _authenticate(ws, bot.settings)
-            logger.info(f"Connected to Alpaca news stream (execution={bot.settings.execution}, "
-                        f"symbols={sorted(bot.settings.symbols) or 'all'})")
-            async for raw in ws:
-                received_at = _now()
-                messages = parse_messages(raw)
-                for message in messages:
-                    if check_control(message) == "subscription":
-                        logger.info(f"Subscribed to news: {message.get('news')}")
-                for symbol, article, news_id in news_tasks(messages, seen, bot.settings):
-                    executor.submit(run_handle, symbol, article, received_at, news_id)
-        except ConnectionClosed as exc:
-            logger.warning(f"News stream closed ({exc}); reconnecting")
+            messages = parse_messages(raw)
+        except ValueError as exc:
+            logger.warning(f"Ignoring unparseable stream frame: {exc}")
             continue
+        for message in messages:
+            try:
+                if check_control(message) == "subscription":
+                    logger.info(f"Subscribed to news: {message.get('news')}")
+            except StreamError as exc:
+                logger.error(str(exc))
+        for symbol, article, news_id in news_tasks(messages, seen, bot.settings):
+            executor.submit(run_handle, symbol, article, received_at, news_id)
+
+
+async def flatten_loop(bot: NewsBot, interval: float = FLATTEN_CHECK_SECONDS) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(bot.maybe_flatten)
+        except Exception:
+            logger.exception("End-of-day flatten failed; retrying")
+        await asyncio.sleep(interval)
+
+
+async def stream(bot: NewsBot, executor: ThreadPoolExecutor) -> None:
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed
+
+    seen = SeenIds()
+    flattener = asyncio.create_task(flatten_loop(bot))
+    try:
+        async for ws in connect(STREAM_URL):  # reconnects with backoff on network errors
+            try:
+                await _authenticate(ws, bot.settings)
+                logger.info(f"Connected to Alpaca news stream (execution={bot.settings.execution}, "
+                            f"symbols={sorted(bot.settings.symbols) or 'all'})")
+                await consume(ws, bot, executor, seen)
+            except ConnectionClosed as exc:
+                logger.warning(f"News stream closed ({exc}); reconnecting")
+                continue
+    finally:
+        flattener.cancel()
 
 
 # --- CLI --------------------------------------------------------------------
