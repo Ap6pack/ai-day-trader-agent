@@ -182,6 +182,49 @@ def test_a_zero_limit_price_is_not_a_price(journal):
     assert "Cannot size this order" in run(event, journal)
 
 
+@pytest.mark.parametrize("amount", ["nan", "inf", "-100", "0"])
+def test_an_unusable_dollar_amount_does_not_short_circuit_the_cap(journal, amount):
+    """dollar_amount bypasses the quantity x price path, so it must be usable
+    on its own. NaN passes every comparison and a zero or negative amount reads
+    as free, either of which would wave through the 10,000 shares at $900 that
+    sit beside it in the same payload."""
+    reviewed(journal)
+    event = pre(order(dollar_amount=amount, quantity="10000", limit_price="900"))
+    assert "Cannot size this order" in run(event, journal)
+
+
+def test_a_usable_dollar_amount_is_still_honoured(journal):
+    reviewed(journal)
+    assert run(pre(order(dollar_amount="400", quantity="10000", limit_price="900")),
+               journal) is None                              # within the $500 cap
+    assert "exceeds TRADER_MAX_ORDER_USD" in run(
+        pre(order(dollar_amount="600", quantity="1", limit_price="1")), journal)
+
+
+def test_option_review_and_placement_record_the_same_notional(journal):
+    """The contract multiplier belongs to the instrument, not the action.
+
+    Deriving it from the order tools alone journalled a review of 2 contracts
+    at $3 as $6 while the matching placement journalled $600 - a 100x
+    disagreement between two records of one order.
+    """
+    payload = {"symbol": "NVDA", "side": "buy", "quantity": "2", "limit_price": "3"}
+    for tool in ("review_option_order", "place_option_order"):
+        guard.handle(post(payload, tool=f"mcp__robinhood-trading__{tool}"), journal=journal)
+
+    notionals = {row["tool"]: row["notional"] for row in journal.events(5)}
+    assert notionals["review_option_order"] == notionals["place_option_order"] == 600.0, (
+        f"review and placement disagree on the same order: {notionals}"
+    )
+
+
+def test_equity_review_is_not_given_a_contract_multiplier(journal):
+    """Only option tools carry the 100x; equity reviews must stay at face value."""
+    payload = {"symbol": "AAPL", "side": "buy", "quantity": "2", "limit_price": "3"}
+    guard.handle(post(payload), journal=journal)
+    assert journal.events(1)[0]["notional"] == 6.0
+
+
 def test_non_order_tools_are_ignored(journal):
     assert run(pre({"symbols": ["AAPL"]}, tool="mcp__Robinhood__get_equity_quotes"), journal) is None
     assert journal.events() == []

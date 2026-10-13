@@ -66,12 +66,9 @@ def _now() -> str:
 
 
 def default_capital() -> float:
-    import os
-
-    try:
-        return float(os.getenv("TRADING_CAPITAL") or 5000.0)
-    except ValueError:
-        return 5000.0
+    # Through the shared validator so TRADING_CAPITAL cannot be nan/inf here
+    # while trader.analysis correctly rejects it for the same variable.
+    return config.env_float("TRADING_CAPITAL", 5000.0)
 
 
 class Portfolios:

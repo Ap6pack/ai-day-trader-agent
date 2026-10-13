@@ -26,6 +26,7 @@ prompt still asks the user.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,6 +47,16 @@ SIZEABLE_ORDER_TOOLS = EQUITY_ORDER_TOOLS | {"place_option_order", "place_crypto
 # A US equity option contract is 100 shares: a $3.00 premium is $300 of exposure.
 # Sizing a contract as if it were one share under-counts the order 100-fold.
 OPTION_CONTRACT_MULTIPLIER = 100
+# Every tool that prices an option, whichever side of the hook it fires on. The
+# multiplier belongs to the instrument, not to the action: deriving it from
+# OPTION_ORDER_TOOLS alone recorded a review of 2 contracts at $3 as $6 while
+# the matching placement recorded $600, for the same order.
+OPTION_TOOLS = OPTION_ORDER_TOOLS | {"review_option_order"}
+
+
+def contract_multiplier(tool: str) -> int:
+    """Shares per unit of quantity for this instrument."""
+    return OPTION_CONTRACT_MULTIPLIER if tool in OPTION_TOOLS else 1
 
 
 @dataclass
@@ -71,9 +82,13 @@ def order_notional(tool_input: Dict[str, Any], multiplier: float = 1) -> Optiona
     `multiplier` is the contract size: 1 for shares and crypto units,
     OPTION_CONTRACT_MULTIPLIER for option contracts.
     """
+    # A dollar_amount short-circuits the quantity x price path, so it has to be
+    # a usable number on its own. NaN passes every comparison, and a zero or
+    # negative amount reads as a free order; either would wave through whatever
+    # quantity and price sit beside it in the same payload.
     dollar_amount = _number(tool_input.get("dollar_amount"))
     if dollar_amount is not None:
-        return dollar_amount
+        return dollar_amount if math.isfinite(dollar_amount) and dollar_amount > 0 else None
     quantity = _number(tool_input.get("quantity"))
     # A zero or negative price is not a price. Treat it as absent so the order
     # is reported unsizeable and denied, rather than sized at $0 and waved past
@@ -119,7 +134,7 @@ def evaluate_order(
     if side not in ("buy", "sell"):
         return Verdict(False, "Order is missing a buy/sell side.")
 
-    multiplier = OPTION_CONTRACT_MULTIPLIER if tool in OPTION_ORDER_TOOLS else 1
+    multiplier = contract_multiplier(tool)
     notional = order_notional(tool_input, multiplier)
     if notional is None:
         return Verdict(False, (
@@ -190,10 +205,8 @@ def handle(event: Dict[str, Any], journal: Optional[Journal] = None,
                 side=tool_input.get("side"),
                 quantity=_number(tool_input.get("quantity")),
                 price=_number(tool_input.get("limit_price")),
-                notional=(order_notional(
-                    tool_input,
-                    OPTION_CONTRACT_MULTIPLIER if tool in OPTION_ORDER_TOOLS else 1,
-                ) if tool in SIZEABLE_ORDER_TOOLS | REVIEW_TOOLS else None),
+                notional=(order_notional(tool_input, contract_multiplier(tool))
+                          if tool in SIZEABLE_ORDER_TOOLS | REVIEW_TOOLS else None),
                 payload={"input": tool_input, "response": event.get("tool_response")},
                 now=now,
             )
