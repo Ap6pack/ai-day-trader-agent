@@ -328,12 +328,17 @@ def newsbot_status(journal: Journal) -> Dict[str, Any]:
 # --- JUDGE: Jev on recent headlines, with the bot's rules --------------------------
 
 
-def judge_symbol(symbol: str) -> Dict[str, Any]:
+def judge_symbol(symbol: str, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Judge a symbol's recent headlines with the news bot's rules.
+
+    `now` is injectable so the headline-age rule can be tested against a fixed
+    clock, as trader.newsbot.decide and trader.dividends.dividend_signal already allow.
+    """
     if not jev_news.is_configured():
         raise HTTPException(400, "TYPESAFE_API_KEY is not set: Jev is needed to judge headlines.")
     settings = bot_settings() or newsbot.Settings()
     relaxed = dataclasses.replace(settings, max_headline_age_seconds=JUDGE_MAX_AGE_HOURS * 3600)
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     articles = [a for a in get_news_articles(symbol) if a.get("title")][:JUDGE_MAX_ARTICLES]
     headlines = []
     for article in articles:
