@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from trader import config
 from trader.config import secret
 from trader.news_sources import alpaca_data_url, alpaca_headers
 
@@ -113,10 +114,9 @@ def _require_account() -> None:
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name) or default)
-    except ValueError:
-        return default
+    # Delegates so one validator rejects non-finite limits everywhere
+    # (trader.config.env_float); a NaN limit silently stops being enforced.
+    return config.env_float(name, default)
 
 
 @dataclass(frozen=True)
