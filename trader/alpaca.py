@@ -177,7 +177,18 @@ def _request(method: str, url: str, **kwargs: Any) -> Any:
 
 
 def market_clock() -> Dict[str, Any]:
-    """Alpaca's market clock: {is_open, next_open, next_close, timestamp}. Raises on failure."""
+    """Alpaca's market clock: {is_open, next_open, next_close, timestamp}. Raises on failure.
+
+    Gated like every other function that sends credentials to the trading host:
+    _request attaches APCA-API-KEY-ID and APCA-API-SECRET-KEY, so without this
+    check a mistyped or pasted ALPACA_TRADING_BASE_URL would ship the live
+    trading keys to an arbitrary host (over plain HTTP, if that is what it says).
+    Callers all fail closed on the raise: the news bot and the desk autopilot
+    report "market clock unavailable" and place no order, trader.autopilot falls
+    back to its weekday heuristic, and the desk reports the account as
+    unavailable.
+    """
+    _require_account()
     return _request("GET", trading_base_url() + "/v2/clock")
 
 
