@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from trader import config
 from trader.news_sources import alpaca_configured, alpaca_data_url, alpaca_headers
 
 logger = logging.getLogger(__name__)
@@ -38,10 +39,9 @@ def enabled() -> bool:
 
 
 def _float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name) or default)
-    except ValueError:
-        return default
+    # Delegates so one validator rejects non-finite limits everywhere
+    # (trader.config.env_float); a NaN limit silently stops being enforced.
+    return config.env_float(name, default)
 
 
 def cash_dividends(symbol: str, today: Optional[date] = None) -> List[Dict[str, Any]]:

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Verified green on all three before this workflow was added.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # No API keys and no .env are present in CI, so every credential-gated
+      # path takes its "not configured" branch. Nothing can reach a broker:
+      # trader.alpaca refuses any host but the paper/live Alpaca hosts, and
+      # live needs ALPACA_LIVE_TRADING=true, which is never set here.
+      - name: Run tests
+        run: python -m pytest -q

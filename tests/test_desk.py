@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -163,11 +163,21 @@ def test_websocket_hello_and_watch(env, journal, monkeypatch):
 # --- JUDGE ----------------------------------------------------------------------------
 
 
+def _recent(hours_ago: float) -> str:
+    """A timestamp relative to the wall clock.
+
+    JUDGE reads the real clock, so fixtures must be relative: a hard-coded date
+    silently ages past JUDGE_MAX_AGE_HOURS and the test starts failing on a day
+    nobody touched the code.
+    """
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+
+
 def test_judge_applies_the_bot_rules_to_recent_headlines(env, journal, monkeypatch):
     env.setenv("TYPESAFE_API_KEY", "t")
     articles = [
-        {"title": "Nvidia wins $5B contract", "publishedAt": "2026-09-28T10:00:00Z", "url": "u1"},
-        {"title": "10 stocks to watch", "publishedAt": "2026-09-28T09:00:00Z", "url": "u2"},
+        {"title": "Nvidia wins $5B contract", "publishedAt": _recent(2), "url": "u1"},
+        {"title": "10 stocks to watch", "publishedAt": _recent(3), "url": "u2"},
     ]
     judgments = {
         "Nvidia wins $5B contract": {"relevance": 0.97, "materiality": 0.8, "p_bullish": 0.9,
@@ -190,6 +200,40 @@ def test_judge_needs_jev(env, journal):
     with client_for(journal) as c:
         res = c.post("/api/desk/judge/NVDA")
     assert res.status_code == 400 and "TYPESAFE_API_KEY" in res.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "published, hours_after, expected",
+    [
+        ("2026-09-28T10:00:00Z", 2, "buy"),     # inside JUDGE_MAX_AGE_HOURS
+        ("2026-09-28T10:00:00Z", 23, "buy"),    # still inside, just
+        ("2026-09-28T10:00:00Z", 25, "none"),   # past the 24h judge window
+        ("2026-09-28T10:00:00Z", 24 * 14, "none"),
+    ],
+)
+def test_judge_headline_age_is_measured_against_an_injected_clock(
+    env, monkeypatch, published, hours_after, expected
+):
+    """judge_symbol takes `now`, so the age rule is testable against a fixed clock.
+
+    Before this seam existed the only coverage ran on the wall clock against a
+    hard-coded fixture date, so the suite went red once that date aged out.
+    """
+    env.setenv("TYPESAFE_API_KEY", "t")
+    article = {"title": "Nvidia wins $5B contract", "publishedAt": published, "url": "u1"}
+    monkeypatch.setattr(desk, "get_news_articles", lambda s: [article])
+    monkeypatch.setattr(
+        desk.jev_news, "judge_headline",
+        lambda s, a: {"relevance": 0.97, "materiality": 0.8, "p_bullish": 0.9,
+                      "p_bearish": 0.02, "event_type": "product"},
+    )
+    monkeypatch.setattr(desk.market_feed, "get_quotes", lambda syms: {"NVDA": {"last": 100.0}})
+
+    now = datetime.fromisoformat(published.replace("Z", "+00:00")) + timedelta(hours=hours_after)
+    result = desk.judge_symbol("NVDA", now=now)
+
+    assert result["headlines"][0]["action"] == expected
+    assert result["call"] == ("BUY" if expected == "buy" else "NONE")
 
 
 # --- manual paper ticket ----------------------------------------------------------------

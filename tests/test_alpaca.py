@@ -46,7 +46,37 @@ def test_every_order_function_refuses_non_paper(monkeypatch, no_http, url):
         alpaca.close_all_positions()
     with pytest.raises(alpaca.NotPaperError):
         alpaca.positions()
+    with pytest.raises(alpaca.NotPaperError):
+        alpaca.market_clock()
     assert no_http == []
+
+
+def test_market_clock_never_sends_credentials_to_an_unapproved_host(monkeypatch):
+    """market_clock() attaches the API key and secret like every other trading
+    call, so it must refuse an unapproved host rather than ship them there."""
+    sent = []
+
+    def fake_request(method, url, **kwargs):
+        sent.append((method, url, kwargs.get("headers")))
+        return {"is_open": True}
+
+    monkeypatch.setattr(alpaca, "_request", fake_request)
+    monkeypatch.setenv("ALPACA_API_KEY", "PK_KEY_ID")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "SUPER_SECRET")
+    monkeypatch.delenv("ALPACA_LIVE_TRADING", raising=False)
+
+    for url in ("http://127.0.0.1:9", "https://evil.example",
+                "https://paper-api.alpaca.markets.evil.example",
+                "https://api.alpaca.markets"):  # live host without the opt-in
+        monkeypatch.setenv("ALPACA_TRADING_BASE_URL", url)
+        with pytest.raises(alpaca.AccountError):
+            alpaca.market_clock()
+    assert sent == []
+
+    # The approved paper host still works.
+    monkeypatch.delenv("ALPACA_TRADING_BASE_URL", raising=False)
+    assert alpaca.market_clock() == {"is_open": True}
+    assert sent[0][1] == "https://paper-api.alpaca.markets/v2/clock"
 
 
 def test_order_functions_call_paper_endpoints(monkeypatch, no_http):

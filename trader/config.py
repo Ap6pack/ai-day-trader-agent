@@ -9,6 +9,7 @@ shadow the key or limit in .env.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,8 +60,44 @@ def _get(env: Dict[str, str], name: str, default: str) -> str:
     return value if value else default
 
 
+def finite(name: str, value: float) -> float:
+    """Reject a non-finite limit.
+
+    float() accepts "nan", "NaN", "inf", "infinity" and "-inf". A NaN limit
+    silently stops working rather than failing: every comparison against NaN is
+    False, so `notional > max_order_usd` never trips, the cap is gone, and
+    nothing tells the operator. inf disables a cap just as quietly. A limit that
+    cannot be enforced must be an error, not a default.
+    """
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{name} must be a finite number, got {value!r}. A non-finite limit "
+            "cannot be enforced: every comparison against NaN is False."
+        )
+    return value
+
+
 def _float(env: Dict[str, str], name: str, default: float) -> float:
-    return float(_get(env, name, str(default)))
+    return finite(name, float(_get(env, name, str(default))))
+
+
+def env_float(name: str, default: float, *, strict: bool = False) -> float:
+    """Read a float from os.environ. Non-finite values always raise.
+
+    `strict` controls only unparseable values: False keeps the forgiving
+    fall-back-to-default behaviour the os.getenv call sites already had, so this
+    changes nothing except that a non-finite limit can no longer pass silently.
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return finite(name, float(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        if strict:
+            raise ValueError(f"{name} must be a number, got {raw!r}") from None
+        return finite(name, float(default))
+    return finite(name, value)
 
 
 def _int(env: Dict[str, str], name: str, default: int) -> int:

@@ -121,6 +121,110 @@ def test_options_and_crypto_blocked_by_default(journal, tool):
     assert "disabled" in run(pre({"symbol": "AAPL"}, tool=tool), journal)
 
 
+# --- enabling options/crypto must not disable every other limit -------------
+
+OPTIONS_ON = Limits(mode="live", max_order_usd=500, max_orders_per_day=2,
+                    review_window_minutes=15, allow_options=True)
+CRYPTO_ON = Limits(mode="live", max_order_usd=500, max_orders_per_day=2,
+                   review_window_minutes=15, allow_crypto=True)
+OPTION_PLACE = "mcp__robinhood-trading__place_option_order"
+CRYPTO_PLACE = "mcp__robinhood-trading__place_crypto_order"
+
+
+def test_option_buy_respects_the_dollar_cap(journal):
+    """1000 contracts at $50 is $5,000,000 of exposure, not $50,000: a US
+    equity option contract is 100 shares."""
+    event = pre(order(quantity="1000", limit_price="50"), tool=OPTION_PLACE)
+    reason = run(event, journal, limits=OPTIONS_ON)
+    assert "exceeds TRADER_MAX_ORDER_USD" in reason
+    assert "$5,000,000.00" in reason and "1000 contracts x 100 shares" in reason
+
+
+def test_crypto_buy_respects_the_dollar_cap(journal):
+    event = pre(order(symbol="BTC", quantity="10", limit_price="90000"), tool=CRYPTO_PLACE)
+    reason = run(event, journal, limits=CRYPTO_ON)
+    assert "exceeds TRADER_MAX_ORDER_USD" in reason and "$900,000.00" in reason
+
+
+@pytest.mark.parametrize("tool, limits", [(OPTION_PLACE, OPTIONS_ON), (CRYPTO_PLACE, CRYPTO_ON)])
+def test_non_equity_respects_the_symbol_allowlist(journal, tool, limits):
+    limits = Limits(**{**limits.__dict__, "allowed_symbols": frozenset({"MSFT"})})
+    reason = run(pre(order(quantity="1", limit_price="1"), tool=tool), journal, limits=limits)
+    assert "not in TRADER_ALLOWED_SYMBOLS" in reason
+
+
+@pytest.mark.parametrize("tool, limits", [(OPTION_PLACE, OPTIONS_ON), (CRYPTO_PLACE, CRYPTO_ON)])
+def test_non_equity_market_orders_are_unsizeable_and_denied(journal, tool, limits):
+    """Same rule as equity: no price in the payload means no cap can be applied."""
+    event = pre({"symbol": "AAPL", "side": "buy", "type": "market", "quantity": "5"}, tool=tool)
+    assert "Cannot size this order" in run(event, journal, limits=limits)
+
+
+@pytest.mark.parametrize("tool, limits", [(OPTION_PLACE, OPTIONS_ON), (CRYPTO_PLACE, CRYPTO_ON)])
+def test_non_equity_within_the_cap_is_allowed(journal, tool, limits):
+    qty, price = ("1", "2") if tool == OPTION_PLACE else ("1", "200")
+    event = pre(order(quantity=qty, limit_price=price), tool=tool)
+    assert run(event, journal, limits=limits) is None  # no deny
+
+
+def test_exercise_still_honours_the_allowlist_and_the_daily_cap(journal):
+    """Exercise cannot be priced from the request, so it keeps the checks that
+    do not need a price rather than skipping all of them."""
+    limits = Limits(**{**OPTIONS_ON.__dict__, "allowed_symbols": frozenset({"MSFT"})})
+    tool = "mcp__robinhood-trading__exercise_option"
+    assert "not in TRADER_ALLOWED_SYMBOLS" in run(pre({"symbol": "AAPL"}, tool=tool), journal, limits=limits)
+    assert run(pre({"symbol": "MSFT"}, tool=tool), journal, limits=limits) is None
+
+
+def test_a_zero_limit_price_is_not_a_price(journal):
+    """limit_price=0 must not size the order at $0 and sail past the cap."""
+    event = pre(order(quantity="1000", limit_price="0"))
+    assert "Cannot size this order" in run(event, journal)
+
+
+@pytest.mark.parametrize("amount", ["nan", "inf", "-100", "0"])
+def test_an_unusable_dollar_amount_does_not_short_circuit_the_cap(journal, amount):
+    """dollar_amount bypasses the quantity x price path, so it must be usable
+    on its own. NaN passes every comparison and a zero or negative amount reads
+    as free, either of which would wave through the 10,000 shares at $900 that
+    sit beside it in the same payload."""
+    reviewed(journal)
+    event = pre(order(dollar_amount=amount, quantity="10000", limit_price="900"))
+    assert "Cannot size this order" in run(event, journal)
+
+
+def test_a_usable_dollar_amount_is_still_honoured(journal):
+    reviewed(journal)
+    assert run(pre(order(dollar_amount="400", quantity="10000", limit_price="900")),
+               journal) is None                              # within the $500 cap
+    assert "exceeds TRADER_MAX_ORDER_USD" in run(
+        pre(order(dollar_amount="600", quantity="1", limit_price="1")), journal)
+
+
+def test_option_review_and_placement_record_the_same_notional(journal):
+    """The contract multiplier belongs to the instrument, not the action.
+
+    Deriving it from the order tools alone journalled a review of 2 contracts
+    at $3 as $6 while the matching placement journalled $600 - a 100x
+    disagreement between two records of one order.
+    """
+    payload = {"symbol": "NVDA", "side": "buy", "quantity": "2", "limit_price": "3"}
+    for tool in ("review_option_order", "place_option_order"):
+        guard.handle(post(payload, tool=f"mcp__robinhood-trading__{tool}"), journal=journal)
+
+    notionals = {row["tool"]: row["notional"] for row in journal.events(5)}
+    assert notionals["review_option_order"] == notionals["place_option_order"] == 600.0, (
+        f"review and placement disagree on the same order: {notionals}"
+    )
+
+
+def test_equity_review_is_not_given_a_contract_multiplier(journal):
+    """Only option tools carry the 100x; equity reviews must stay at face value."""
+    payload = {"symbol": "AAPL", "side": "buy", "quantity": "2", "limit_price": "3"}
+    guard.handle(post(payload), journal=journal)
+    assert journal.events(1)[0]["notional"] == 6.0
+
+
 def test_non_order_tools_are_ignored(journal):
     assert run(pre({"symbols": ["AAPL"]}, tool="mcp__Robinhood__get_equity_quotes"), journal) is None
     assert journal.events() == []

@@ -26,6 +26,7 @@ prompt still asks the user.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,7 +39,24 @@ EQUITY_ORDER_TOOLS = {"place_equity_order"}
 OPTION_ORDER_TOOLS = {"place_option_order", "exercise_option"}
 CRYPTO_ORDER_TOOLS = {"place_crypto_order"}
 ORDER_TOOLS = EQUITY_ORDER_TOOLS | OPTION_ORDER_TOOLS | CRYPTO_ORDER_TOOLS
-REVIEW_TOOLS = {"review_equity_order"}
+# Reviews are journaled for every asset class so the record is complete. Only
+# equity orders *require* a matching review (see evaluate_order).
+REVIEW_TOOLS = {"review_equity_order", "review_option_order", "preview_crypto_order"}
+# Orders priced per share/unit, so notional is quantity x price.
+SIZEABLE_ORDER_TOOLS = EQUITY_ORDER_TOOLS | {"place_option_order", "place_crypto_order"}
+# A US equity option contract is 100 shares: a $3.00 premium is $300 of exposure.
+# Sizing a contract as if it were one share under-counts the order 100-fold.
+OPTION_CONTRACT_MULTIPLIER = 100
+# Every tool that prices an option, whichever side of the hook it fires on. The
+# multiplier belongs to the instrument, not to the action: deriving it from
+# OPTION_ORDER_TOOLS alone recorded a review of 2 contracts at $3 as $6 while
+# the matching placement recorded $600, for the same order.
+OPTION_TOOLS = OPTION_ORDER_TOOLS | {"review_option_order"}
+
+
+def contract_multiplier(tool: str) -> int:
+    """Shares per unit of quantity for this instrument."""
+    return OPTION_CONTRACT_MULTIPLIER if tool in OPTION_TOOLS else 1
 
 
 @dataclass
@@ -58,15 +76,27 @@ def _number(value: Any) -> Optional[float]:
     return float(value)
 
 
-def order_notional(tool_input: Dict[str, Any]) -> Optional[float]:
-    """Dollar value of an equity order computed only from its own fields."""
+def order_notional(tool_input: Dict[str, Any], multiplier: float = 1) -> Optional[float]:
+    """Dollar value of an order computed only from its own fields.
+
+    `multiplier` is the contract size: 1 for shares and crypto units,
+    OPTION_CONTRACT_MULTIPLIER for option contracts.
+    """
+    # A dollar_amount short-circuits the quantity x price path, so it has to be
+    # a usable number on its own. NaN passes every comparison, and a zero or
+    # negative amount reads as a free order; either would wave through whatever
+    # quantity and price sit beside it in the same payload.
     dollar_amount = _number(tool_input.get("dollar_amount"))
     if dollar_amount is not None:
-        return dollar_amount
+        return dollar_amount if math.isfinite(dollar_amount) and dollar_amount > 0 else None
     quantity = _number(tool_input.get("quantity"))
-    price = _number(tool_input.get("limit_price")) or _number(tool_input.get("stop_price"))
-    if quantity is not None and price is not None:
-        return quantity * price
+    # A zero or negative price is not a price. Treat it as absent so the order
+    # is reported unsizeable and denied, rather than sized at $0 and waved past
+    # the cap.
+    prices = [p for p in (_number(tool_input.get("limit_price")),
+                          _number(tool_input.get("stop_price"))) if p is not None and p > 0]
+    if quantity is not None and quantity > 0 and prices:
+        return quantity * prices[0] * multiplier
     return None
 
 
@@ -87,26 +117,36 @@ def evaluate_order(
         return Verdict(False, "Options orders are disabled (set TRADER_ALLOW_OPTIONS=true to enable).")
     if tool in CRYPTO_ORDER_TOOLS and not limits.allow_crypto:
         return Verdict(False, "Crypto orders are disabled (set TRADER_ALLOW_CRYPTO=true to enable).")
-    if tool not in EQUITY_ORDER_TOOLS:
-        # Options/crypto were explicitly enabled; only the daily cap applies.
-        return _check_daily_cap(limits, journal, now) or Verdict(True, "Allowed by guard.")
-
     symbol = str(tool_input.get("symbol") or "").upper()
-    side = str(tool_input.get("side") or "").lower()
-    if not symbol or side not in ("buy", "sell"):
-        return Verdict(False, "Order is missing a symbol or a buy/sell side.")
+    if not symbol:
+        return Verdict(False, "Order is missing a symbol.")
     if limits.allowed_symbols and symbol not in limits.allowed_symbols:
         return Verdict(False, f"{symbol} is not in TRADER_ALLOWED_SYMBOLS.")
 
-    notional = order_notional(tool_input)
+    # Exercising cannot be priced from the call's own fields (the cost is the
+    # strike, which is not in the payload), so it gets the checks that do not
+    # need a price. It stays off unless TRADER_ALLOW_OPTIONS is set.
+    if tool == "exercise_option":
+        return _check_daily_cap(limits, journal, now) or Verdict(
+            True, f"Within limits: exercise {symbol} (not sizeable from the request).")
+
+    side = str(tool_input.get("side") or "").lower()
+    if side not in ("buy", "sell"):
+        return Verdict(False, "Order is missing a buy/sell side.")
+
+    multiplier = contract_multiplier(tool)
+    notional = order_notional(tool_input, multiplier)
     if notional is None:
         return Verdict(False, (
-            "Cannot size this order: a market order by share quantity has no price. "
+            "Cannot size this order: a market order by quantity has no price. "
             "Use a limit order (a marketable limit at the current ask) or dollar_amount."
         ))
     if side == "buy" and notional > limits.max_order_usd:
+        contract_note = (f" ({tool_input.get('quantity')} contracts x "
+                         f"{OPTION_CONTRACT_MULTIPLIER} shares)" if multiplier != 1 else "")
         return Verdict(False, (
-            f"Buy of ${notional:,.2f} exceeds TRADER_MAX_ORDER_USD (${limits.max_order_usd:,.2f})."
+            f"Buy of ${notional:,.2f}{contract_note} exceeds TRADER_MAX_ORDER_USD "
+            f"(${limits.max_order_usd:,.2f})."
         ), notional)
 
     capped = _check_daily_cap(limits, journal, now)
@@ -114,7 +154,12 @@ def evaluate_order(
         capped.notional = notional
         return capped
 
-    if journal.latest_review(symbol, side, limits.review_window_minutes, now=now) is None:
+    # Only equity orders require a matching review. The option and crypto review
+    # payload shapes have not been confirmed against a live Robinhood MCP server,
+    # so requiring one here could block an asset class on a field-name guess.
+    # Their reviews ARE journaled now (see REVIEW_TOOLS), so the record is there.
+    if tool in EQUITY_ORDER_TOOLS and journal.latest_review(
+            symbol, side, limits.review_window_minutes, now=now) is None:
         return Verdict(False, (
             f"No review_equity_order for {side} {symbol} in the last "
             f"{limits.review_window_minutes} minutes. Review the order first."
@@ -160,7 +205,8 @@ def handle(event: Dict[str, Any], journal: Optional[Journal] = None,
                 side=tool_input.get("side"),
                 quantity=_number(tool_input.get("quantity")),
                 price=_number(tool_input.get("limit_price")),
-                notional=order_notional(tool_input) if tool in EQUITY_ORDER_TOOLS | REVIEW_TOOLS else None,
+                notional=(order_notional(tool_input, contract_multiplier(tool))
+                          if tool in SIZEABLE_ORDER_TOOLS | REVIEW_TOOLS else None),
                 payload={"input": tool_input, "response": event.get("tool_response")},
                 now=now,
             )

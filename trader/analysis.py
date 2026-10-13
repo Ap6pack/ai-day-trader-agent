@@ -34,10 +34,9 @@ SENTIMENT_ARTICLES = 10
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name) or default)
-    except ValueError:
-        return default
+    # Delegates so one validator rejects non-finite limits everywhere
+    # (trader.config.env_float); a NaN limit silently stops being enforced.
+    return config.env_float(name, default)
 
 
 def timeframe() -> str:

@@ -97,7 +97,7 @@ reading `.env` or editing the guard's configuration.
 Claude Desktop or claude.ai chat are not guarded by this project. Use Claude Code for
 anything that can place an order.
 
-## The news bot (Alpaca paper)
+## The news bot
 
 `python -m trader.newsbot run` streams Alpaca news, judges each headline with Jev and
 applies the `NEWSBOT_*` rules in `.env`: a relevance, materiality and bullish-probability
@@ -108,16 +108,19 @@ new entries near the close. It is long only; bearish signals are journaled as `s
 decisions so they are scored, but never shorted.
 
 - `NEWSBOT_EXECUTION=off` (the default) journals signals without ordering. Set it to
-  `paper` to trade.
-- Order functions refuse to run unless `ALPACA_TRADING_BASE_URL` is
-  `https://paper-api.alpaca.markets` (the default). There is no live mode.
+  `paper` to trade the Alpaca paper account, or `live` to trade real money — which
+  additionally requires the opt-in in [Real money](#real-money-alpaca-live). The mode
+  must match the configured account or `run` refuses to start.
+- Order functions refuse any base URL but `https://paper-api.alpaca.markets` (the
+  default), or `https://api.alpaca.markets` with `ALPACA_LIVE_TRADING=true`. Anything
+  else, including the live host without that flag, refuses every order.
 - The Claude Code order guard does not see these orders; the limits live in the bot.
 - `python -m trader.newsbot replay SYMBOL --hours 24` applies the rules to recent
   headlines, never trading or journaling, for tuning thresholds.
-- `run` flattens (cancels open orders, closes every paper position)
-  `NEWSBOT_FLATTEN_MINUTES` before the close, read from Alpaca's clock, so early-close
-  days are covered. `python -m trader.newsbot flatten` does the same by hand or as a
-  cron backup.
+- `run` flattens `NEWSBOT_FLATTEN_MINUTES` before the close, read from Alpaca's clock,
+  so early-close days are covered: on paper it cancels open orders and closes every
+  position; on a live account it closes only the shares the bot itself bought.
+  `python -m trader.newsbot flatten` does the same by hand or as a cron backup.
 - The bot picks its own stocks with `NEWSBOT_SYMBOLS=auto`: every
   `NEWSBOT_UNIVERSE_REFRESH_MINUTES` it rebuilds today's in-play list from Alpaca's
   most-active stocks and top movers (above `TRADER_MIN_PRICE`) plus `TRADER_WATCHLIST`,
@@ -153,6 +156,15 @@ After the close, `trader.autopilot` starts Claude Code unattended (`claude -p`, 
 
 ## Real money (Alpaca live)
 
+> **Not ready for unattended real money.** Two independent reviews found defects that
+> are not yet fixed, including agents that can place orders after being switched off,
+> flattening that can double-sell or strand a working entry, a daily order cap that
+> concurrent agents can exceed, and a dashboard that, with no token set, a page on
+> another origin can read and drive. Each is reproduced by a test in
+> [`tests/regressions/`](tests/regressions/) and listed with its severity in
+> [`FINDINGS.md`](tests/regressions/FINDINGS.md). The switches below work as described;
+> the problem is what happens around them.
+
 Everything runs on the Alpaca **paper** account unless you opt in. To trade real money:
 
 ```bash
@@ -182,9 +194,19 @@ no agent can skip them: `ALPACA_LIVE_MAX_ORDER_USD` (default $500 per order),
 (default $200; new buys stop for the day once the account is down that much). Sells
 are never blocked, so you can always get out.
 
-Your own holdings are safe: on a live account the news bot and the autopilot only sell
-and flatten shares they bought that day (tracked by their order ids), never positions
-you already hold, and "close every position" is paper only.
+Your own holdings are *mostly* kept out of it, by design rather than by proof: on a
+live account the news bot and the autopilot sell and flatten only shares they bought
+that day, tracked by their order ids, and "close every position" is paper only.
+
+**That separation has a known hole.** Flattening reads the quantity it owns, tries to
+cancel its bracket exits, ignores a cancellation that fails, and then sells the
+quantity it read. If an exit fills in that window the position is already flat, and the
+market sell comes out of whatever else is in the account — reproduced taking 5 shares
+of a 100-share personal position, and opening a naked short on a margin account. A
+pending entry the bot never cancels can also still fill after it reports itself flat.
+Tracked as FINDING-B1 and FINDING-B2 in
+[`tests/regressions/FINDINGS.md`](tests/regressions/FINDINGS.md). Do not rely on the
+separation until those are closed.
 
 Start small, watch the desk, and run `python -m trader.newsbot replay SYMBOL` on recent
 headlines first. Robinhood real-money trading is separate: it goes through Claude Code
