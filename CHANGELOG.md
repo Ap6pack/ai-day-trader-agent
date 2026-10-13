@@ -7,6 +7,19 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Continuous integration: `.github/workflows/ci.yml` runs the test suite on Python
+  3.11, 3.12 and 3.13 on every push and pull request. CI holds no credentials and no
+  `.env`, so every credential-gated path takes its "not configured" branch.
+- `tests/regressions/`: deterministic, offline regression tests for every defect found
+  in two independent reviews of `d6e0768`. Each asserts the intended safe behaviour and
+  names its finding id; the ones not yet fixed carry `xfail(strict=True)`, so fixing a
+  defect turns the test XPASS and fails the build until the marker is removed. The
+  package's `conftest.py` makes any real HTTP call an error and strips every trader
+  environment variable, so no test can reach a broker or read a credential.
+  `tests/regressions/FINDINGS.md` maps each finding id to its test.
+- `docs/evidence/`: the sanitized reproduction probes behind those findings, with
+  instructions. Deliberately excluded from CI — some bind sockets, spawn processes or
+  configure a live account mode to exercise real-money code paths.
 - The agents run on their own: `python -m trader.desk` starts the news bot as a
   supervised process (`trader.supervisor`: restarted with backoff if it stops; setup
   errors reported, not retried; output in `data/newsbot.log`) and starts the autopilot
@@ -77,8 +90,49 @@ All notable changes to this project will be documented in this file.
   failures stop `run`.
 - `websockets` dependency.
 
+### Security
+- `trader.alpaca.market_clock()` now refuses any host but the Alpaca paper host, or the
+  live host with `ALPACA_LIVE_TRADING=true`, like every other function that reaches the
+  trading API. It attaches the API key and secret, so before this a mistyped or pasted
+  `ALPACA_TRADING_BASE_URL` sent live trading credentials to whatever that pointed at,
+  in cleartext if the URL said `http`. It is the most-called function in the system, so
+  the window was seconds from start-up. Every caller already fails closed on the raise.
+- Enabling `TRADER_ALLOW_OPTIONS` or `TRADER_ALLOW_CRYPTO` no longer disables the rest
+  of the order guard. Those orders skipped the dollar cap, the symbol allowlist and the
+  sizeability requirement, leaving only the daily count — a $900,000 crypto buy passed
+  with the shipped $500 cap. They now take the same path as equity orders. Option
+  notional uses the 100-share contract multiplier, so 1,000 contracts at $50 is priced
+  as $5,000,000 of exposure rather than $50,000.
+- Non-finite numeric limits are refused instead of silently not being enforced.
+  `float()` accepts `nan` and `inf`, and every comparison against NaN is False, so
+  `TRADER_MAX_ORDER_USD=nan` let a $10,000 buy through the guard and
+  `ALPACA_LIVE_MAX_DAILY_LOSS_USD=nan` disabled the real-money daily loss stop outright.
+  One validator (`config.finite` / `config.env_float`) now covers every money limit,
+  replacing four near-identical `os.getenv` float helpers that had drifted apart.
+
+### Fixed
+- The test suite was red on any day more than 24 hours after 2026-09-28: a desk test
+  pinned its headlines to a fixed date while `desk.judge_symbol` read the wall clock,
+  so the fixtures aged past the 24-hour judge window. `judge_symbol` now takes an
+  optional `now`, matching the seam `newsbot.decide` and `dividends.dividend_signal`
+  already offer, and the fixtures are built relative to the current time.
+- `guard.order_notional` treated a zero price as absent (`limit_price or stop_price`),
+  so a `limit_price` of 0 silently fell through to the stop price. A non-positive price
+  is now not a price: the order is reported unsizeable and denied.
+
 ### Removed
 - `trader.scan.market_clock`, which nothing called; `trader.alpaca.market_clock` replaces it.
+
+### Known issues
+Two independent reviews of `d6e0768` found defects that are **not yet fixed**, including
+agents that can place orders after being switched off, flattening that can double-sell or
+strand a working entry, a live daily-order cap that concurrent agents can exceed, and a
+tokenless desk that a page on another origin can read and drive. Each is reproduced by an
+`xfail(strict=True)` test in `tests/regressions/`; `tests/regressions/FINDINGS.md` lists
+them with severity. **Keep live automation disabled** (`ALPACA_LIVE_TRADING=false`,
+`NEWSBOT_EXECUTION=off`, `DESK_AUTOPILOT_MODE=signals`) until they are closed. Set those
+values explicitly rather than commenting them out: `config.load_env` only overrides keys
+present in `.env`, so a commented-out key leaves a stale shell export in force.
 
 ---
 
