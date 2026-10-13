@@ -257,15 +257,21 @@ def test_c1a_concurrent_live_buys_cannot_exceed_the_daily_cap(monkeypatch):
     monkeypatch.setenv("ALPACA_LIVE_MAX_ORDER_USD", "100000")
 
     accepted: list[dict] = []
-    gate = threading.Barrier(2)
+    both_have_counted = threading.Barrier(2)
 
     def fake_request(method, url, **kwargs):
         if "/v2/orders" in url and method == "GET":
             # The race window is between reading the day's orders and POSTing.
             # Hold both callers here so each sees the same remaining allowance,
-            # which is exactly what two agents in separate processes do.
+            # which is exactly what two agents in separate processes do. A
+            # correct fix serializes the whole check-and-send, so the second
+            # caller never arrives: the timeout is the FIXED path, not a
+            # failure, and is caught rather than asserted.
             snapshot = list(accepted)
-            gate.wait(timeout=5)
+            try:
+                both_have_counted.wait(timeout=1.0)
+            except threading.BrokenBarrierError:
+                pass
             return snapshot
         if "/trades/latest" in url:
             return {"trade": {"p": 10.0}}
@@ -278,23 +284,114 @@ def test_c1a_concurrent_live_buys_cannot_exceed_the_daily_cap(monkeypatch):
 
     monkeypatch.setattr(alpaca, "_request", fake_request)
 
+    refused: list[alpaca.LiveLimitError] = []
+    crashed: list[BaseException] = []
+
     def submit():
         try:
             alpaca.submit_order({"symbol": "NVDA", "qty": "1", "side": "buy",
                                  "type": "market", "time_in_force": "day"})
-        except alpaca.LiveLimitError:
-            pass
+        except alpaca.LiveLimitError as exc:
+            refused.append(exc)
+        except BaseException as exc:                      # noqa: BLE001
+            crashed.append(exc)
 
     threads = [threading.Thread(target=submit) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=5)
+        t.join(timeout=10)
 
-    assert len(accepted) <= 1, (
+    # Without this, two dead workers leave accepted empty and the cap assertion
+    # below passes while nothing was ever submitted.
+    assert not crashed, f"worker raised an unexpected exception: {crashed!r}"
+    assert not any(t.is_alive() for t in threads), "a worker never finished"
+    assert len(accepted) + len(refused) == 2, (
+        f"both workers must reach a verdict: {len(accepted)} sent, "
+        f"{len(refused)} refused"
+    )
+
+    assert len(accepted) == 1, (
         f"{len(accepted)} live buys were accepted against "
         "ALPACA_LIVE_MAX_ORDERS_PER_DAY=1"
     )
+    assert len(refused) == 1, "the second buy should be refused by the daily cap"
+
+
+def _child_submit(barrier, ledger, errors):
+    """Run one live buy in a separate OS process against a shared fake broker."""
+    from trader import alpaca as child_alpaca
+
+    def fake_request(method, url, **kwargs):
+        if "/v2/orders" in url and method == "GET":
+            snapshot = [dict(o) for o in ledger]
+            try:
+                barrier.wait(timeout=2.0)
+            except Exception:                              # noqa: BLE001
+                pass            # serialized correctly: the sibling never arrived
+            return snapshot
+        if "/trades/latest" in url:
+            return {"trade": {"p": 10.0}}
+        if url.endswith("/v2/account"):
+            return {"equity": "100000", "last_equity": "100000"}
+        if method == "POST" and url.endswith("/v2/orders"):
+            ledger.append({"side": "buy", "status": "accepted"})
+            return {"id": "o", "status": "accepted"}
+        return {}
+
+    child_alpaca._request = fake_request
+    try:
+        child_alpaca.submit_order({"symbol": "NVDA", "qty": "1", "side": "buy",
+                                   "type": "market", "time_in_force": "day"})
+    except child_alpaca.LiveLimitError:
+        pass
+    except BaseException as exc:                           # noqa: BLE001
+        errors.append(repr(exc))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="FINDING-C1a-xproc: the same cap, across OS processes. The news bot runs "
+           "as its own process (trader.supervisor spawns it) while the autopilot and "
+           "the desk ticket run in the desk, so a threading.Lock cannot span them. "
+           "This is the test that distinguishes an in-process lock (which would turn "
+           "the sibling test green while real money still over-trades) from a durable "
+           "reservation. Remove only when the reservation survives across processes.",
+)
+def test_c1a_cross_process_live_buys_cannot_exceed_the_daily_cap(monkeypatch):
+    import multiprocessing
+
+    if multiprocessing.get_start_method(allow_none=True) != "fork" and \
+            "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("needs the fork start method to share the patched environment")
+
+    monkeypatch.setenv("ALPACA_TRADING_BASE_URL", "https://api.alpaca.markets")
+    monkeypatch.setenv("ALPACA_LIVE_TRADING", "true")
+    monkeypatch.setenv("ALPACA_LIVE_MAX_ORDERS_PER_DAY", "1")
+    monkeypatch.setenv("ALPACA_LIVE_MAX_ORDER_USD", "100000")
+
+    ctx = multiprocessing.get_context("fork")
+    with ctx.Manager() as manager:
+        ledger, errors = manager.list(), manager.list()
+        barrier = ctx.Barrier(2)
+        procs = [ctx.Process(target=_child_submit, args=(barrier, ledger, errors))
+                 for _ in range(2)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=30)
+
+        alive = [p for p in procs if p.is_alive()]
+        for p in alive:
+            p.kill()
+            p.join(timeout=5)
+        assert not alive, "a child process hung"
+        assert list(errors) == [], f"child raised unexpectedly: {list(errors)}"
+        assert [p.exitcode for p in procs] == [0, 0], (
+            f"child exit codes {[p.exitcode for p in procs]}")
+        assert len(ledger) == 1, (
+            f"{len(ledger)} live buys were accepted across two processes against "
+            "ALPACA_LIVE_MAX_ORDERS_PER_DAY=1")
 
 
 @pytest.mark.xfail(

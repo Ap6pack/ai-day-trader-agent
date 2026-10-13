@@ -69,23 +69,28 @@ def test_d1b_broker_modes_refuse_demo_sourced_prices(journal, portfolios, monkey
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FINDING-D1c: DemoMarket stamps simulated bars with the current wall clock, "
-           "so a bar-age freshness check passes on fabricated data. Any fix for D1 must "
-           "key off provenance as well as timestamp. Remove when demo bars are "
-           "distinguishable by something other than their timestamp.",
-)
-def test_d1c_demo_bars_are_not_disguised_as_fresh_real_data(monkeypatch):
+def test_d1c_a_freshness_check_alone_cannot_detect_simulated_data(monkeypatch):
+    """Not a defect - a constraint on how D1a/D1b may be fixed.
+
+    Simulated bars legitimately carry current timestamps; DemoMarket builds them
+    from the wall clock on purpose, so the chart meets the quote. That means a
+    bar-age guard, the obvious fix for "stale data reached an order", passes
+    fabricated data unchanged. The feed already labels it, so the execution
+    boundary has to consult `source`, not just the timestamp.
+
+    Pinned as a passing test rather than an xfail: making this fail would mean
+    falsifying demo timestamps, which is not the fix anyone wants.
+    """
     import time
 
     monkeypatch.setenv("DESK_DEMO_MODE", "true")
     bars = market_feed.get_bars("NVDA", "1Min", 20)
-    newest_age = time.time() - bars["bars"][-1]["time"]
 
-    assert newest_age > 120, (
-        f"the newest simulated bar is {newest_age:.0f}s old, so it is indistinguishable "
-        "from live data by timestamp alone"
+    assert bars["source"] == "demo", "the feed must label simulated data at source"
+    newest_age = time.time() - bars["bars"][-1]["time"]
+    assert newest_age < 300, (
+        "demo bars are timestamped as current, so any fix for D1a/D1b that keys "
+        "only off bar age would admit them"
     )
 
 
@@ -133,32 +138,93 @@ def test_h2_a_partially_failed_flatten_is_not_counted_as_closed(journal):
 # --- portfolio ledger integrity --------------------------------------------
 
 
+class _ReadSyncConnection:
+    """A sqlite3 connection that pauses at its first portfolio read.
+
+    Synchronising the *database reads* rather than the thread start is what
+    makes this deterministic. Timing the threads leaves the interleaving to the
+    scheduler, which reproduced the defect only intermittently.
+    """
+
+    def __init__(self, conn, arrive):
+        self._conn = conn
+        self._arrive = arrive
+        self._paused = False
+
+    def execute(self, sql, *args, **kwargs):
+        cursor = self._conn.execute(sql, *args, **kwargs)
+        if not self._paused and "FROM portfolios WHERE name" in sql:
+            self._paused = True
+            self._arrive()
+        return cursor
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="FINDING-P1: Portfolios.record_fill SELECTs cash and holdings before "
            "SQLite's deferred transaction takes a write lock, so two concurrent fills "
-           "read the same pre-state and the later UPDATE wins. Reproduced 25/25: two "
-           "$1,000 buys both accepted against $1,000 of cash. Remove when the "
-           "transaction opens with BEGIN IMMEDIATE.",
+           "read the same pre-state and the later UPDATE wins - two $1,000 buys both "
+           "accepted against $1,000 of cash. Remove when the transaction opens with "
+           "BEGIN IMMEDIATE.",
 )
-def test_p1_concurrent_fills_cannot_overspend_the_cash_balance(portfolios):
+def test_p1_concurrent_fills_cannot_overspend_the_cash_balance(portfolios, monkeypatch):
+    """Deterministic in both directions.
+
+    Today: a deferred transaction lets both threads reach the read, the barrier
+    trips, both act on the same stale balance.
+
+    Once BEGIN IMMEDIATE lands: the second thread blocks acquiring the write
+    lock *before* its read, so the barrier times out, the first fill completes,
+    and the second reads the true balance and is rejected. The timeout is the
+    fixed path, not a failure - which is why it is caught rather than asserted.
+    """
     portfolios.create("race", 1000.0)
-    start = threading.Barrier(2)
-    accepted, rejected = [], []
+    both_have_read = threading.Barrier(2)
+
+    def arrive():
+        try:
+            both_have_read.wait(timeout=1.0)
+        except threading.BrokenBarrierError:
+            pass        # correctly serialized: the other thread never got here
+
+    real_connect = type(portfolios)._connect
+
+    def syncing_connect(self):
+        return _ReadSyncConnection(real_connect(self), arrive)
+
+    monkeypatch.setattr(type(portfolios), "_connect", syncing_connect)
+
+    accepted, rejected, crashed = [], [], []
 
     def buy():
-        start.wait(timeout=5)
         try:
-            portfolios.record_fill("race", "AAPL", "buy", 10, 100.0)  # $1,000 each
+            portfolios.record_fill("race", "AAPL", "buy", 10, 100.0)   # $1,000 each
             accepted.append(1)
         except PortfolioError:
             rejected.append(1)
+        except BaseException as exc:                                   # noqa: BLE001
+            crashed.append(exc)
 
     threads = [threading.Thread(target=buy) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=5)
+        t.join(timeout=10)
+
+    # A worker that died proves nothing either way, so fail loudly instead of
+    # letting an empty result satisfy the assertion below.
+    assert not crashed, f"worker raised an unexpected exception: {crashed!r}"
+    assert not any(t.is_alive() for t in threads), "a worker never finished"
+    assert len(accepted) + len(rejected) == 2, "both workers must reach a verdict"
 
     view = portfolios.get("race")
     held = view["holdings"][0]["qty"] if view["holdings"] else 0
@@ -184,27 +250,53 @@ def test_portfolio_rejects_an_oversized_buy_when_uncontended(portfolios):
 # --- H1: the scoring window ------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FINDING-H1: `journal pending` filters ts < today-midnight-ET, but the "
-           "cron runs `autopilot score` at 16:20 ET, twenty minutes AFTER the close. "
-           "Every decision made during the session it was meant to score is excluded "
-           "and waits a day. Low severity: nothing is lost, the query has no lower "
-           "bound. Remove when pending covers decisions whose trading day has closed.",
-)
-def test_h1_same_day_decisions_are_scorable_after_the_close(journal):
+def test_unscored_decisions_returns_rows_strictly_before_its_cutoff(journal):
+    """The query is correct and stays correct: `older_than` means what it says.
+
+    H1 is about the cutoff the *caller* chooses, not about this contract, so it
+    is pinned here to keep a fix for H1 from loosening the query underneath it.
+    """
     from datetime import datetime, timezone
 
-    from trader.journal import MARKET_TZ
-
-    ten_am_et = datetime(2026, 9, 28, 14, 0, tzinfo=timezone.utc)   # 10:00 ET
+    ten_am_et = datetime(2026, 9, 28, 14, 0, tzinfo=timezone.utc)
     journal.add_decision("NVDA", "buy", 100.0, thesis="intraday", now=ten_am_et)
 
-    score_time = datetime(2026, 9, 28, 20, 20, tzinfo=timezone.utc)  # 16:20 ET
-    midnight = score_time.astimezone(MARKET_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    pending = journal.unscored_decisions(older_than=midnight)
+    before = datetime(2026, 9, 28, 13, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 9, 28, 20, 20, tzinfo=timezone.utc)   # 16:20 ET
+    assert journal.unscored_decisions(older_than=before) == []
+    assert [r["symbol"] for r in journal.unscored_decisions(older_than=after)] == ["NVDA"]
 
-    assert [r["symbol"] for r in pending] == ["NVDA"], (
-        "the decision made at 10:00 ET is not in `pending` at 16:20 ET, so the "
-        "after-close scoring run skips the session it was meant to score"
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="FINDING-H1: the `pending` CLI picks today-midnight-ET as its cutoff, but "
+           "the cron runs `autopilot score` at 16:20 ET - twenty minutes AFTER the "
+           "close, when the day's closing price is already knowable. Every decision "
+           "made during the session it was meant to score is excluded and waits a "
+           "day. The defect is the caller's cutoff selection, not "
+           "unscored_decisions(older_than=...), whose semantics are pinned above. "
+           "Low severity: nothing is lost, the query has no lower bound. Remove when "
+           "`pending` covers decisions whose trading day has already closed.",
+)
+def test_h1_the_pending_command_lists_same_day_decisions_after_the_close(
+    journal, monkeypatch, capsys
+):
+    from datetime import datetime, timezone
+
+    from trader import journal as journal_module
+
+    ten_am_et = datetime(2026, 9, 28, 14, 0, tzinfo=timezone.utc)
+    journal.add_decision("NVDA", "buy", 100.0, thesis="intraday", now=ten_am_et)
+
+    # Run the actual CLI the scoring cron invokes, with the clock at 16:20 ET.
+    score_time = datetime(2026, 9, 28, 20, 20, tzinfo=timezone.utc)
+    monkeypatch.setattr(journal_module, "_now", lambda: score_time)
+    monkeypatch.setattr(journal_module, "Journal", lambda *a, **k: journal)
+
+    assert journal_module.main(["pending"]) == 0
+    listed = capsys.readouterr().out
+
+    assert "NVDA" in listed, (
+        "`journal pending` at 16:20 ET does not list the decision made at 10:00 ET, "
+        "so the after-close scoring run skips the very session it exists to score"
     )
